@@ -24,7 +24,6 @@
 - [ ] 4. 本番: 会話・会議で1回使いShojiが判定（未実施）
 
 ## 次の一手
-- 開発Mac担当: このブランチを共有リモートへpushし、bot MacBook Airへ渡す
-- bot MacBook Air担当: [実機チェックリスト](docs/MAC_DEPLOY_CHECKLIST.md) に沿ってブランチを取得し、Driveミラーリングと `Cards/` 作成（A-02残り）
-- bot MacBook Air担当: 既存botへ検索分岐を追加し、四関門2・3の結果をこのファイルへ記録
+- Mac担当: [実機チェックリスト](docs/MAC_DEPLOY_CHECKLIST.md) に沿ってDriveミラーリングと `Cards/` 作成（A-02残り）
+- Mac担当: 同チェックリストで既存botへ検索分岐を追加し、四関門2・3の結果をこのファイルへ記録
 - Shoji: 四関門4を1回実施し「役立った / 要改善」を記録
