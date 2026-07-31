@@ -10,6 +10,8 @@
   （指示書: docs/HANDOFF_GPT56.md、設計: docs/DESIGN.md）
 - bot結合点はCLI 1本のみ: `python3 -m knowledge_hub.find "<クエリ>"`（exit 0のstdoutをそのまま返信）
 - LLM経路は `KH_CLAUDE_CMD` で差し替え可能（既定 `claude -p`）
+- 開発中のMacBookとTelegram bot稼働中のMacBook Airは別マシン。実機組み込み、Driveミラーリング、
+  実Vault検証はすべてbot MacBook Air側で行う
 
 ## 検証済み（このリポジトリ内）
 - unittest 29本 green（HANDOFFテストマトリクスと既知クエリの受け入れ関門1を含む）
