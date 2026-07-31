@@ -138,9 +138,20 @@ def extract_snippet(abs_path: Path, line_numbers: list[int],
     return snippet
 
 
-def icloud_placeholders_exist(vault: Path) -> bool:
-    """iCloudが実体を退避させた痕跡（.icloudプレースホルダ）があるか。"""
-    return next(vault.rglob("*.icloud"), None) is not None
+def icloud_placeholders_exist(vault: Path, timeout: float = 3.0) -> bool:
+    """iCloudプレースホルダを時間制限付きで探す。
+
+    ``Path.rglob`` はiCloud未ダウンロード領域で長時間ブロックする場合があるため、
+    独立プロセスの ``find`` を使い、必ず打ち切れるようにする。
+    """
+    try:
+        proc = subprocess.run(
+            ["find", str(vault), "-type", "f", "-name", "*.icloud", "-print", "-quit"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return bool(proc.stdout.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def try_brctl_download(vault: Path) -> bool:

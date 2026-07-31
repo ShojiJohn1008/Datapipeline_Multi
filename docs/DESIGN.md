@@ -23,6 +23,8 @@ bot は stdout をそのまま Telegram に返信する
 
 - **bot本体のコードはこのリポジトリに含まれない**（Mac上の既存bot）。結合は「CLIを叩いてstdoutを返す」1点のみ。
   既存botのルーティングを壊さないための最小接点。
+- `/find` は過去ノートの検索・引用であり意思決定の自動化ではない。一般的な臨床知識は検索対象に
+  できるが、患者識別情報・患者別臨床記録はTelegramへ出さず、最終判断は利用者が行う。
 - LLM呼び出しは `claude -p`（CLI）をサブプロセス実行。環境変数 `KH_CLAUDE_CMD` で差し替え可能
   （既存botのAPI経路に乗せ替える場合もこの1点を変えるだけ）。
 
@@ -113,7 +115,7 @@ recency_weight = 0.25 + 0.75 × exp(−age_days × ln2 / 90)
 
 📚 出典:
 1. <ファイル名（拡張子なし）>（YYYY-MM-DD）
-   obsidian://open?vault=<URLエンコード済Vault名>&file=<URLエンコード済相対パス(拡張子なし)>
+   📋 URI（長押しでコピー）: `obsidian://open?vault=<URLエンコード済Vault名>&file=<URLエンコード済相対パス(拡張子なし)>`
 ...最大5件
 （他にも N 件ヒット）
 <注記行: ⚠️/☁️ があれば>
