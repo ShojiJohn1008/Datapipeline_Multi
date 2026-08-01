@@ -47,11 +47,11 @@ Obsidianで Vault（JohnSecondBrain）直下に `Cards/` フォルダを作成�
    （B-01音声レーンのcronがこのパスを監視することになる）
 
 ## 完了チェックリスト
-- [ ] /Archive/2026-08/ が存在
-- [ ] ミラーリング or Archiveのオフライン固定が有効
-- [ ] Vault Cards/ が存在
-- [ ] スマホ投入→Macローカルパスで実体読み取り、が1件通った
-- [ ] パスをSTATUS.mdに記録
+- [x] /Archive/2026-08/ が存在
+- [x] ミラーリング or Archiveのオフライン固定が有効
+- [x] Vault Cards/ が存在
+- [x] スマホ投入→Macローカルパスで実体読み取り、が1件通った
+- [x] 監視パスをMacローカルの環境変数に設定し、結果をSTATUS.mdに記録（実値は非公開）
 
 ## 注意
 - iCloudのVault側は今回触らない（既存運用のまま）
