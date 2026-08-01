@@ -1,0 +1,8 @@
+{
+  "name": "Recall Search",
+  "short_name": "Recall",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#eef1eb",
+  "theme_color": "#17231d"
+}
