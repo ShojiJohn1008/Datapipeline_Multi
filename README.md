@@ -22,3 +22,17 @@ LLM経路は `claude -p`（`KH_CLAUDE_CMD` で差し替え可）。
 Vaultパスは `--vault` → `$KH_VAULT_PATH` → iCloud既定パスの順で解決。
 Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 [Mac実機組み込みチェックリスト](docs/MAC_DEPLOY_CHECKLIST.md) を参照。
+
+## A-03: Recall PWA Vault横断検索
+
+`recall/` は検索一覧を即時表示し、選択したカードだけを後からまとめるPWAフロント、
+`gas/Code.gs` はGoogle Sheets中継、`knowledge_hub.worker` はMac側のポーリングワーカー。
+
+```bash
+export KH_RECALL_GAS_URL="<GASウェブアプリURL>"
+export KH_RECALL_TOKEN="<共有トークン>"
+export KH_VAULT_PATH="<Vaultパス>"
+python3 -m knowledge_hub.worker
+```
+
+導入手順と受け入れ確認は [A-03デプロイチェックリスト](docs/A03_DEPLOY_CHECKLIST.md) を参照。
