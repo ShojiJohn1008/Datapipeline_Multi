@@ -26,7 +26,8 @@ Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 ## Voice Memos 取り込み（実装済み・MacBook Airデプロイ待ち）
 
 iPhone Voice Memos の同期済み `.m4a` を、元ファイルに手を加えず共有Archive
-へコピーし、ローカル文字起こし後に検索可能な共有Cardsカードにする。PDFと同じ
+へコピーし、同じ場所の決定論的なtranscript JSON sidecar、検索可能な共有Cardsカードの
+3層で保存する。PDFと同じ
 ローカルSQLite JobStoreでハッシュ重複、再試行、出力の完了状態を管理する。
 初回は過去録音を誤投入しないため、必ず明示的な基準化が必要。
 
@@ -34,6 +35,7 @@ iPhone Voice Memos の同期済み `.m4a` を、元ファイルに手を加え�
 python3 -m knowledge_hub.voice_memos --baseline-existing --once
 # 新規録音を監視するには（KH_ARCHIVE_PATH, KH_VAULT_PATH,
 # KH_CARDS_PATH, KH_STATE_DB_PATH, KH_AUDIO_TRANSCRIBE_CMD を必要に応じ設定）
+# KH_AUDIO_SUMMARY_CMD を設定した場合だけ共有AgentProviderでsemantic summaryを生成
 python3 -m knowledge_hub.voice_memos --watch
 ```
 

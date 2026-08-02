@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from knowledge_hub.agent_provider import CardDraft
 from knowledge_hub.config import PipelinePaths, ensure_pipeline_directories
 from knowledge_hub.job_store import JobStore, sha256_file
 from knowledge_hub.recall import _frontmatter
@@ -20,8 +21,28 @@ from knowledge_hub.voice_memos import (
     AUDIO_MEDIA_TYPE,
     SourcePermissionError,
     VoiceMemosIngestor,
+    audio_output_paths,
+    process_one_audio,
     main,
 )
+
+
+class FakeSummaryProvider:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls = 0
+
+    def create_card(self, text: str, metadata: dict[str, object]) -> CardDraft:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("summary unavailable")
+        return CardDraft(
+            title="構造化した音声メモ",
+            summary="意味のある要約です。",
+            category="meeting",
+            tags=["会議", "音声"],
+            key_points=["最初の要点", "次の要点"],
+        )
 
 
 class VoiceMemosTests(unittest.TestCase):
@@ -120,6 +141,94 @@ class VoiceMemosTests(unittest.TestCase):
         observation = json.loads(self.state.read_text(encoding="utf-8"))
         observed_item = next(iter(observation["items"].values()))
         self.assertFalse({"sha256", "archive_rel", "archive_path", "card_path", "transcript"} & observed_item.keys())
+
+    def test_sidecar_and_semantic_summary_are_durable_before_completion(self) -> None:
+        self._baseline()
+        provider = FakeSummaryProvider()
+        ingestor = self._ingestor(summary_provider=provider)
+        recording = self._recording()
+        ingestor.scan_once()
+        report = ingestor.scan_once()
+        job = self._audio_jobs()[0]
+        output = audio_output_paths(job, self.paths)
+        payload = json.loads(output.transcript.read_text(encoding="utf-8"))
+        self.assertEqual(report.cards, 1)
+        self.assertEqual(payload["schema"], "knowledge_hub.voice_memos.transcript")
+        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["content_hash"], sha256_file(recording))
+        self.assertEqual(payload["source_sha256"], job.content_hash)
+        self.assertEqual(payload["transcriber"], Path(sys.executable).name)
+        self.assertIsInstance(payload["model"], str)
+        self.assertIsInstance(payload["language"], str)
+        self.assertEqual(payload["transcript"], "これは テスト 録音 の文字起こしです")
+        self.assertEqual(provider.calls, 1)
+        card_text = output.card.read_text(encoding="utf-8")
+        metadata = _frontmatter(output.card)
+        self.assertEqual(metadata["title"], "構造化した音声メモ")
+        self.assertEqual(metadata["summary"], "意味のある要約です。")
+        self.assertEqual(metadata["category"], "meeting")
+        self.assertIn('tags: ["会議","音声"]', card_text)
+        self.assertIn("## Key points", card_text)
+        self.assertIn("これは テスト 録音 の文字起こしです", card_text)
+
+    def test_summary_retry_reuses_sidecar_without_rerunning_transcriber(self) -> None:
+        self._baseline()
+        provider = FakeSummaryProvider(fail=True)
+        ingestor = self._ingestor(summary_provider=provider)
+        self._recording()
+        ingestor.scan_once()
+        report = ingestor.scan_once()
+        job = self._audio_jobs()[0]
+        output = audio_output_paths(job, self.paths)
+        self.assertEqual((report.errors, JobStore(self.paths.state_db).get(job.content_hash).status),
+                         (["Voice Memos 処理保留: audio_summary_failed"], "failed"))
+        self.assertTrue(output.transcript.is_file())
+        provider.fail = False
+        with patch("knowledge_hub.voice_memos._run_transcriber",
+                   side_effect=AssertionError("sidecar should be reused")):
+            retry = ingestor.scan_once()
+        self.assertEqual(retry.cards, 1)
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(self._audio_jobs()[0].status, "completed")
+
+    def test_invalid_or_mismatched_sidecar_fails_safely(self) -> None:
+        self._baseline()
+        provider = FakeSummaryProvider(fail=True)
+        ingestor = self._ingestor(summary_provider=provider)
+        self._recording()
+        ingestor.scan_once()
+        ingestor.scan_once()
+        job = self._audio_jobs()[0]
+        output = audio_output_paths(job, self.paths)
+        payload = json.loads(output.transcript.read_text(encoding="utf-8"))
+        payload["content_hash"] = "0" * 64
+        output.transcript.write_text(json.dumps(payload), encoding="utf-8")
+        report = ingestor.scan_once()
+        failed = JobStore(self.paths.state_db).get(job.content_hash)
+        self.assertEqual((report.errors, failed.last_error),
+                         (["Voice Memos 処理保留: output_collision"], "output_collision"))
+        self.assertNotIn("private-name", " ".join(report.errors))
+        output.transcript.write_text("{not-json", encoding="utf-8")
+        corrupt = ingestor.scan_once()
+        self.assertEqual(corrupt.errors, ["Voice Memos 処理保留: transcript_sidecar_invalid"])
+        self.assertEqual(JobStore(self.paths.state_db).get(job.content_hash).last_error,
+                         "transcript_sidecar_invalid")
+
+    def test_existing_card_without_sidecar_never_short_circuits_completion(self) -> None:
+        self._baseline()
+        recording = self._recording()
+        store = JobStore(self.paths.state_db)
+        job, _ = store.register_file(recording, media_type=AUDIO_MEDIA_TYPE)
+        output = audio_output_paths(job, self.paths)
+        output.archive.parent.mkdir(parents=True)
+        output.archive.write_bytes(recording.read_bytes())
+        output.card.parent.mkdir(parents=True)
+        output.card.write_text('---\ncontent_hash: "{}"\n---\n'.format(job.content_hash), encoding="utf-8")
+        with patch("knowledge_hub.voice_memos._run_transcriber",
+                   side_effect=AssertionError("invalid completion must not transcribe")):
+            result = process_one_audio(self.paths, store, self.source, transcribe_command=self.command)
+        self.assertEqual(result.error_code, "transcript_sidecar_invalid")
+        self.assertEqual(JobStore(self.paths.state_db).get(job.content_hash).status, "failed")
 
     def test_same_hash_is_deduplicated(self) -> None:
         self._baseline()

@@ -1,6 +1,6 @@
 # Voice Memos 取り込み: MacBook Air デプロイチェックリスト
 
-このレーンは、iPhone の Voice Memos が MacBook Air に **同期・ダウンロード済み**になった後だけ使う。ソースの録音は常に読み取り専用で、共有パイプラインの `Archive/YYYY/MM/` へコピーしてから文字起こしし、共有 `Cards/YYYY/MM/` にカードを作る。PDFと共通のローカルSQLite JobStoreがハッシュ重複、再試行、Archive/Card出力を管理する。録音内容やtranscriptはSQLiteへ保存しない。
+このレーンは、iPhone の Voice Memos が MacBook Air に **同期・ダウンロード済み**になった後だけ使う。ソースの録音は常に読み取り専用で、共有パイプラインの `Archive/YYYY/MM/` に原音声と決定論的な `.transcript.json` sidecarを保存してから、共有 `Cards/YYYY/MM/` に要約・全文Transcript入りカードを作る。PDFと共通のローカルSQLite JobStoreがハッシュ重複、再試行、3出力の完了を管理する。録音内容やtranscriptはSQLiteへ保存しない。
 
 ## 事前確認
 
@@ -20,6 +20,8 @@
    python3 -m venv .venv
    .venv/bin/pip install mlx-whisper
    export KH_AUDIO_TRANSCRIBE_CMD="$(pwd)/.venv/bin/python $(pwd)/scripts/transcribe_with_mlx_whisper.py"
+   # semantic summaryを使うときだけ設定する。未設定ならローカルfallbackでカードを作る。
+   # export KH_AUDIO_SUMMARY_CMD="claude -p"
    export KH_ARCHIVE_PATH="/実在する/GoogleDrive/Archive"
    export KH_VAULT_PATH="/実在する/ObsidianVault"
    # 必要なら共有パイプラインの既定から変更する
@@ -33,6 +35,9 @@
    `KH_AUDIO_TRANSCRIBE_TIMEOUT` または `--transcribe-timeout`（既定: 7200秒）で変更できる。
    失敗jobの最大再試行回数は `--max-attempts`（既定: 3）、強制終了した文字起こしclaimを
    再投入するまでの時間は `--stale-after-seconds`（既定: 900秒）で指定できる。
+   `KH_AUDIO_SUMMARY_CMD` は既存の共有AgentProvider JSON契約を使う明示opt-inである。
+   未設定時は外部CLIを起動せず、短いtranscript excerpt・`voice_memos`/`audio` tags・要点を
+   決定論的にカード化する。要約失敗時もsidecarは保持され、再試行で文字起こしは再実行しない。
 
 ## 初回と検証
 
@@ -53,8 +58,8 @@ mtimeを持つ録音が同期遅延で後から現れた場合も、追加の防
 
 新規の短いテスト録音を1件作り、少なくとも2回の走査（既定では30秒ごとの watch）後に次を確認する。
 
-1. Archive に `YYYY/MM/voice-memo--<hash8>.m4a` がコピーされ、元の録音が残っている。
-2. `Cards/YYYY/MM/` のカードにscalar frontmatterとtranscriptがあり、共有状態DBのaudio jobがcompletedである。
+1. Archive に `YYYY/MM/voice-memo--<hash8>.m4a` と同じbasenameの`.transcript.json` があり、元の録音が残っている。
+2. `Cards/YYYY/MM/` のカードにsummary、key points、tags、全文Transcriptがあり、共有状態DBのaudio jobがcompletedである。
 3. `python3 -m knowledge_hub.find "テスト録音の語" --vault "$KH_VAULT_PATH" --no-llm` でカードが見つかる。
 4. launchd 再起動後も同じ録音のコピー／カードが増えない。
 
@@ -62,6 +67,7 @@ mtimeを持つ録音が同期遅延で後から現れた場合も、追加の防
 
 `deploy/com.knowledge-hub.voice-memos.plist.template` を `~/Library/LaunchAgents/` へコピーし、すべての `__...__` プレースホルダーをこのMacの絶対パスに置換する。秘密情報や実ユーザーの絶対パスはテンプレートに書き込まない。置換後に以下を行う。
 テンプレートの `KeepAlive` は異常終了した監視プロセスを再起動し、`ThrottleInterval` は再起動を30秒以上あける。
+semantic summaryをopt-inする場合だけ、plistの`EnvironmentVariables`へ`KH_AUDIO_SUMMARY_CMD`を追加する。
 
 ```bash
 LOG_DIR="$HOME/Library/Logs/knowledge-hub"

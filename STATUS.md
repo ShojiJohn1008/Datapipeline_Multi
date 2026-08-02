@@ -14,7 +14,7 @@
   実Vault検証はすべてbot MacBook Air側で行う
 
 ## 検証済み（このリポジトリ内）
-- unittest 92本 green（共有ローカルJobStore、A-03ワーカー、Voice Memos の安全ゲート／再試行、HANDOFFマトリクス、既知クエリの受け入れ関門1を含む）
+- unittest 96本 green（共有ローカルJobStore、A-03ワーカー、Voice Memos の安全ゲート／再試行、HANDOFFマトリクス、既知クエリの受け入れ関門1を含む）
 - CLI end-to-end: ヒット系・0件系・vault不在系・偽LLM・`--json` の全経路
 
 ## 四関門

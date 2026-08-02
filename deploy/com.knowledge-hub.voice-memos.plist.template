@@ -21,6 +21,7 @@
     <key>KH_STATE_DB_PATH</key><string>__STATE_DB_ABSOLUTE_PATH__</string>
     <key>KH_VOICE_MEMOS_STATE</key><string>__STATE_ABSOLUTE_PATH__</string>
     <key>KH_AUDIO_TRANSCRIBE_CMD</key><string>__TRANSCRIBER_COMMAND__</string>
+    <!-- To opt in to semantic summary, add KH_AUDIO_SUMMARY_CMD with a local command. -->
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

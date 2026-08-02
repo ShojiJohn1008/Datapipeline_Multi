@@ -26,6 +26,7 @@ from .config import (
     ensure_pipeline_directories,
     resolve_pipeline_paths,
 )
+from .agent_provider import AgentCommandError, AgentProvider, CardDraft, CliAgentProvider
 from .ingest_pdf import (
     OutputCollisionError,
     SourceUnavailableError,
@@ -46,6 +47,9 @@ DEFAULT_STATE = Path(
 ).expanduser()
 STATE_VERSION = 2
 AUDIO_MEDIA_TYPE = "audio/mp4"
+TRANSCRIPT_SCHEMA = "knowledge_hub.voice_memos.transcript"
+TRANSCRIPT_VERSION = 1
+MAX_TRANSCRIPT_SIDECAR_BYTES = 32 * 1024 * 1024
 
 
 class SourcePermissionError(RuntimeError):
@@ -56,9 +60,18 @@ class AudioTranscriptionError(RuntimeError):
     """A safe, retryable transcription failure."""
 
 
+class TranscriptSidecarError(RuntimeError):
+    """A deterministic transcript sidecar is malformed or unsafe."""
+
+
+class AudioSummaryError(RuntimeError):
+    """A safe retryable failure at the optional semantic-summary boundary."""
+
+
 @dataclass(frozen=True)
 class AudioOutputPaths:
     archive: Path
+    transcript: Path
     card: Path
 
 
@@ -69,6 +82,15 @@ class AudioProcessResult:
     archived_path: Path | None = None
     card_path: Path | None = None
     error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class TranscriptRecord:
+    transcript: str
+    generated_at: str
+    transcriber: str
+    model: str
+    language: str
 
 
 @dataclass
@@ -174,7 +196,7 @@ def _iter_recordings(source: Path) -> list[Path]:
     return sorted(recordings)
 
 
-def _yaml_scalar(value: str) -> str:
+def _yaml_value(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -185,7 +207,17 @@ def _excerpt(transcript: str, limit: int = 160) -> str:
     return compact[:limit - 1] + "…" if len(compact) > limit else compact
 
 
-def _run_transcriber(command: str | None, audio: Path, timeout: float = 7200.0) -> str:
+def _transcriber_provenance(command: str) -> tuple[str, str, str]:
+    """Keep useful provenance without persisting a possibly sensitive command line."""
+    argv = shlex.split(command)
+    return (
+        Path(argv[0]).name,
+        os.environ.get("KH_MLX_WHISPER_MODEL", "unspecified"),
+        os.environ.get("KH_MLX_WHISPER_LANGUAGE", "unspecified"),
+    )
+
+
+def _run_transcriber(command: str | None, audio: Path, timeout: float = 7200.0) -> TranscriptRecord:
     if not command:
         raise AudioTranscriptionError("audio_transcriber_not_configured")
     try:
@@ -204,7 +236,14 @@ def _run_transcriber(command: str | None, audio: Path, timeout: float = 7200.0) 
     if result.returncode != 0:
         # Child stderr can contain sensitive transcript/source details; never retain it.
         raise AudioTranscriptionError("audio_transcription_failed")
-    return result.stdout.strip()
+    transcriber, model, language = _transcriber_provenance(command)
+    return TranscriptRecord(
+        transcript=result.stdout.strip(),
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        transcriber=transcriber,
+        model=model,
+        language=language,
+    )
 
 
 def audio_output_paths(job: JobRecord, paths: PipelinePaths) -> AudioOutputPaths:
@@ -215,12 +254,15 @@ def audio_output_paths(job: JobRecord, paths: PipelinePaths) -> AudioOutputPaths
     # Do not expose a Voice Memo's private recording name in output paths.
     filename = "voice-memo--{}".format(job.content_hash[:8])
     archive = paths.archive / "{:04d}".format(created.year) / "{:02d}".format(created.month) / (filename + ".m4a")
+    transcript = archive.with_suffix(".transcript.json")
     card = paths.cards / "{:04d}".format(created.year) / "{:02d}".format(created.month) / (filename + ".md")
     if not _is_within(archive.resolve(strict=False), paths.archive.resolve(strict=True)):
         raise UnsafePathError("audio archive destination crossed its configured boundary")
     if not _is_within(card.resolve(strict=False), paths.cards.resolve(strict=True)):
         raise UnsafePathError("audio card destination crossed its configured boundary")
-    return AudioOutputPaths(archive, card)
+    if not _is_within(transcript.resolve(strict=False), paths.archive.resolve(strict=True)):
+        raise UnsafePathError("audio transcript destination crossed its configured boundary")
+    return AudioOutputPaths(archive, transcript, card)
 
 
 def _copy_to_archive(source: Path, destination: Path, expected_hash: str, archive_root: Path) -> Path:
@@ -252,6 +294,65 @@ def _copy_to_archive(source: Path, destination: Path, expected_hash: str, archiv
     return destination
 
 
+def _read_transcript_sidecar(path: Path, expected_hash: str) -> TranscriptRecord:
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_TRANSCRIPT_SIDECAR_BYTES:
+            raise TranscriptSidecarError("transcript_sidecar_invalid")
+        with path.open(encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TranscriptSidecarError("transcript_sidecar_invalid") from exc
+    if not isinstance(payload, dict):
+        raise TranscriptSidecarError("transcript_sidecar_invalid")
+    if payload.get("schema") != TRANSCRIPT_SCHEMA or payload.get("version") != TRANSCRIPT_VERSION:
+        raise TranscriptSidecarError("transcript_sidecar_invalid")
+    if payload.get("content_hash") != expected_hash or payload.get("source_sha256") != expected_hash:
+        raise OutputCollisionError("transcript_sidecar_hash_collision")
+    transcript = payload.get("transcript")
+    generated_at = payload.get("generated_at")
+    transcriber = payload.get("transcriber")
+    model = payload.get("model")
+    language = payload.get("language")
+    if not all(isinstance(value, str) for value in
+               (transcript, generated_at, transcriber, model, language)):
+        raise TranscriptSidecarError("transcript_sidecar_invalid")
+    return TranscriptRecord(transcript, generated_at, transcriber, model, language)
+
+
+def _write_transcript_sidecar(destination: Path, record: TranscriptRecord, expected_hash: str,
+                              archive_root: Path) -> TranscriptRecord:
+    """Atomically publish or validate the deterministic sidecar for one audio hash."""
+    _ensure_parent(destination, archive_root)
+    if destination.exists() or destination.is_symlink():
+        return _read_transcript_sidecar(destination, expected_hash)
+    payload = {
+        "schema": TRANSCRIPT_SCHEMA,
+        "version": TRANSCRIPT_VERSION,
+        "content_hash": expected_hash,
+        "source_sha256": expected_hash,
+        "transcriber": record.transcriber,
+        "model": record.model,
+        "language": record.language,
+        "generated_at": record.generated_at,
+        "transcript": record.transcript,
+    }
+    handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".transcript-",
+                                         suffix=".tmp", dir=destination.parent, delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if destination.exists() or destination.is_symlink():
+            return _read_transcript_sidecar(destination, expected_hash)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return _read_transcript_sidecar(destination, expected_hash)
+
+
 def _locate_source(job: JobRecord, paths: PipelinePaths, source_root: Path,
                    output: AudioOutputPaths) -> Path:
     if output.archive.exists() or output.archive.is_symlink():
@@ -274,22 +375,38 @@ def _locate_source(job: JobRecord, paths: PipelinePaths, source_root: Path,
     return source
 
 
+def _fallback_draft(transcript: str, captured_at: str) -> CardDraft:
+    summary = _excerpt(transcript)
+    return CardDraft(
+        title="Voice Memo " + captured_at.replace("T", " ")[:16],
+        summary=summary,
+        category="audio",
+        tags=["voice_memos", "audio"],
+        key_points=[summary],
+    )
+
+
 def render_audio_card(job: JobRecord, archive_relative: Path, transcript: str,
-                      captured_at: str) -> str:
+                      captured_at: str, draft: CardDraft) -> str:
     frontmatter = {
         "id": "audio-" + job.content_hash,
         "content_hash": job.content_hash,
-        "title": "Voice Memo " + captured_at.replace("T", " ")[:16],
+        "title": draft.title,
         "captured_at": captured_at,
-        "summary": _excerpt(transcript),
+        "summary": draft.summary,
+        "category": draft.category,
+        "tags": draft.tags,
+        "key_points": draft.key_points,
         "source_type": "audio",
         "source_app": "voice_memos",
         "source_path": archive_relative.as_posix(),
         "source_sha256": job.content_hash,
     }
     lines = ["---"]
-    lines.extend("{}: {}".format(key, _yaml_scalar(str(value))) for key, value in frontmatter.items())
-    lines.extend(["---", "", "## Original", "", "`{}`".format(archive_relative.as_posix()),
+    lines.extend("{}: {}".format(key, _yaml_value(value)) for key, value in frontmatter.items())
+    lines.extend(["---", "", "## Summary", "", draft.summary, "", "## Key points", ""])
+    lines.extend("- " + point for point in draft.key_points)
+    lines.extend(["", "## Original", "", "`{}`".format(archive_relative.as_posix()),
                   "", "## Transcript", "", transcript, ""])
     return "\n".join(lines)
 
@@ -297,6 +414,10 @@ def render_audio_card(job: JobRecord, archive_relative: Path, transcript: str,
 def _audio_failure_code(error: Exception) -> str:
     if isinstance(error, AudioTranscriptionError):
         return str(error)
+    if isinstance(error, TranscriptSidecarError):
+        return str(error)
+    if isinstance(error, AudioSummaryError):
+        return "audio_summary_failed"
     if isinstance(error, OutputCollisionError):
         return "output_collision"
     if isinstance(error, UnsafePathError):
@@ -308,7 +429,8 @@ def _audio_failure_code(error: Exception) -> str:
 
 def process_one_audio(paths: PipelinePaths, store: JobStore, source_root: Path, *,
                       transcribe_command: str | None, transcribe_timeout: float = 7200.0,
-                      max_attempts: int = 3) -> AudioProcessResult | None:
+                      max_attempts: int = 3,
+                      summary_provider: AgentProvider | None = None) -> AudioProcessResult | None:
     """Claim exactly one ``audio/mp4`` job; PDF jobs remain untouched."""
     job = store.claim_next(max_attempts=max_attempts, media_type=AUDIO_MEDIA_TYPE)
     if job is None:
@@ -319,17 +441,47 @@ def process_one_audio(paths: PipelinePaths, store: JobStore, source_root: Path, 
             _verify_hash(output.archive, job.content_hash)
             if output.card.exists() or output.card.is_symlink():
                 from .ingest_pdf import _existing_card_hash
+                # A legacy/incomplete card is not completion: require the
+                # deterministic sidecar before accepting crash recovery.
+                _read_transcript_sidecar(output.transcript, job.content_hash)
                 if _existing_card_hash(output.card) != job.content_hash:
                     raise OutputCollisionError("audio_card_collision")
                 store.mark_completed(job.content_hash, output.archive, output.card)
                 return AudioProcessResult(job.content_hash, "completed", output.archive, output.card)
         source = _locate_source(job, paths, source_root, output)
         archived = _copy_to_archive(source, output.archive, job.content_hash, paths.archive)
-        transcript = _run_transcriber(transcribe_command, archived, transcribe_timeout)
+        if output.transcript.exists() or output.transcript.is_symlink():
+            transcript_record = _read_transcript_sidecar(output.transcript, job.content_hash)
+        else:
+            transcript_record = _write_transcript_sidecar(
+                output.transcript,
+                _run_transcriber(transcribe_command, archived, transcribe_timeout),
+                job.content_hash,
+                paths.archive,
+            )
+        if output.card.exists() or output.card.is_symlink():
+            from .ingest_pdf import _existing_card_hash
+            if _existing_card_hash(output.card) != job.content_hash:
+                raise OutputCollisionError("audio_card_collision")
+            store.mark_completed(job.content_hash, archived, output.card)
+            return AudioProcessResult(job.content_hash, "completed", archived, output.card)
         captured_at = datetime.fromtimestamp(archived.stat().st_mtime, timezone.utc).isoformat(
             timespec="seconds"
         )
-        content = render_audio_card(job, archived.relative_to(paths.archive), transcript, captured_at)
+        if summary_provider is None:
+            draft = _fallback_draft(transcript_record.transcript, captured_at)
+        else:
+            try:
+                draft = summary_provider.create_card(transcript_record.transcript, {
+                    "content_hash": job.content_hash,
+                    "source_type": "audio",
+                    "source_app": "voice_memos",
+                    "captured_at": captured_at,
+                })
+            except Exception as exc:
+                raise AudioSummaryError() from exc
+        content = render_audio_card(job, archived.relative_to(paths.archive),
+                                    transcript_record.transcript, captured_at, draft)
         _write_card_atomic(output.card, content, job.content_hash, paths.cards)
         store.mark_completed(job.content_hash, archived, output.card)
         return AudioProcessResult(job.content_hash, "completed", archived, output.card)
@@ -347,7 +499,8 @@ class VoiceMemosIngestor:
     def __init__(self, source: Path, paths: PipelinePaths, state_path: Path,
                  settle_seconds: float = 60.0, transcribe_command: str | None = None,
                  transcribe_timeout: float = 7200.0, max_attempts: int = 3,
-                 stale_after_seconds: float = 900.0):
+                 stale_after_seconds: float = 900.0,
+                 summary_provider: AgentProvider | None = None):
         self.source = source.expanduser()
         self.paths = paths
         self.state_path = state_path.expanduser()
@@ -360,6 +513,7 @@ class VoiceMemosIngestor:
             raise ValueError("stale_after_seconds must not be negative")
         self.max_attempts = max_attempts
         self.stale_after_seconds = stale_after_seconds
+        self.summary_provider = summary_provider
 
     def baseline_existing(self) -> ScanReport:
         if self.state_path.exists():
@@ -442,7 +596,8 @@ class VoiceMemosIngestor:
         result = process_one_audio(self.paths, store, self.source,
                                    transcribe_command=self.transcribe_command,
                                    transcribe_timeout=self.transcribe_timeout,
-                                   max_attempts=self.max_attempts)
+                                   max_attempts=self.max_attempts,
+                                   summary_provider=self.summary_provider)
         if result is not None:
             if result.status == "completed":
                 report.archived += 1
@@ -466,6 +621,16 @@ def _resolve_source(value: str | None) -> Path:
     return source
 
 
+def _summary_provider(command: str | None) -> AgentProvider | None:
+    """Use the shared JSON-card contract only when audio summarization is opted in."""
+    if not command:
+        return None
+    try:
+        return CliAgentProvider(command=command)
+    except (AgentCommandError, ValueError) as exc:
+        raise ConfigError("Voice Memos 要約コマンドの設定が不正です: {}".format(exc))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Voice Memos を共有ArchiveとObsidian Cardsへ安全に取り込む")
     parser.add_argument("--once", action="store_true", help="1回だけ走査する")
@@ -486,6 +651,8 @@ def main(argv: list[str] | None = None) -> int:
     first_run.add_argument("--baseline-existing", action="store_true")
     first_run.add_argument("--backfill-existing", action="store_true")
     parser.add_argument("--transcribe-cmd", default=os.environ.get("KH_AUDIO_TRANSCRIBE_CMD"))
+    parser.add_argument("--summary-cmd", default=os.environ.get("KH_AUDIO_SUMMARY_CMD"),
+                        help="共有AgentProvider JSON契約の要約コマンド（未設定ならローカルfallback）")
     args = parser.parse_args(argv)
     try:
         source = _resolve_source(args.source)
@@ -498,9 +665,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.stale_after_seconds < 0:
             raise ConfigError("--stale-after-seconds は0以上を指定してください。")
         state_path = Path(args.state).expanduser() if args.state else DEFAULT_STATE
+        summary_provider = _summary_provider(args.summary_cmd)
         ingestor = VoiceMemosIngestor(source, paths, state_path, args.settle_seconds,
                                       args.transcribe_cmd, args.transcribe_timeout,
-                                      args.max_attempts, args.stale_after_seconds)
+                                      args.max_attempts, args.stale_after_seconds,
+                                      summary_provider)
         if args.baseline_existing:
             report = ingestor.baseline_existing()
             print("既存の Voice Memos {} 件を基準化しました。過去分は取り込みません。".format(report.discovered))
