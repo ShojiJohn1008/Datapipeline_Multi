@@ -23,6 +23,21 @@ Vaultパスは `--vault` → `$KH_VAULT_PATH` → iCloud既定パスの順で解
 Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 [Mac実機組み込みチェックリスト](docs/MAC_DEPLOY_CHECKLIST.md) を参照。
 
+## Voice Memos 取り込み（実装済み・MacBook Airデプロイ待ち）
+
+iPhone Voice Memos の同期済み `.m4a` を、元ファイルに手を加えず Google Drive
+Archive へコピーし、ローカル文字起こし後に検索可能な `Cards/Audio/` カードにする。
+初回は過去録音を誤投入しないため、必ず明示的な基準化が必要。
+
+```bash
+python3 -m knowledge_hub.voice_memos --baseline-existing --once
+# 新規録音を監視するには（KH_ARCHIVE_PATH, KH_VAULT_PATH, KH_AUDIO_TRANSCRIBE_CMD を設定）
+python3 -m knowledge_hub.voice_memos --watch
+```
+
+MacBook Air での同期パス・TCC・実機検証を含む手順は
+[Voice Memos デプロイチェックリスト](docs/VOICE_MEMOS_DEPLOY_CHECKLIST.md) を参照。
+
 ## A-03: Recall PWA Vault横断検索
 
 `recall/` は検索一覧を即時表示し、選択したカードだけを後からまとめるPWAフロント、
