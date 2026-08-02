@@ -224,28 +224,37 @@ class JobStore:
                 ).fetchall()
         return [self._record(row) for row in rows]
 
-    def claim_next(self, *, max_attempts: int = 3) -> Optional[JobRecord]:
+    def claim_next(
+        self, *, max_attempts: int = 3, media_type: Optional[str] = None
+    ) -> Optional[JobRecord]:
         """Atomically claim the oldest eligible pending or failed job.
 
         Failed jobs are eligible until their attempt count reaches
-        ``max_attempts``.  ``BEGIN IMMEDIATE`` serializes competing workers
-        before they select a candidate.
+        ``max_attempts``. When ``media_type`` is supplied, jobs for other
+        adapters remain untouched. ``BEGIN IMMEDIATE`` serializes competing
+        workers before they select a candidate.
         """
         if max_attempts <= 0:
             raise ValueError("max_attempts must be positive")
         now = _now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            media_clause = ""
+            parameters: list[object] = [max_attempts]
+            if media_type is not None:
+                media_clause = " AND media_type = ?"
+                parameters.append(media_type)
             row = connection.execute(
-                """
+                f"""
                 SELECT content_hash FROM jobs
                 WHERE status IN ('pending', 'failed') AND attempts < ?
+                    {media_clause}
                 ORDER BY
                     CASE status WHEN 'pending' THEN 0 ELSE 1 END,
                     created_at, rowid
                 LIMIT 1
                 """,
-                (max_attempts,),
+                parameters,
             ).fetchone()
             if row is None:
                 return None

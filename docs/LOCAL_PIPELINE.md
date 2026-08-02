@@ -77,3 +77,74 @@ ensure_pipeline_directories(paths)  # 実際に書き込む直前に呼ぶ
 
 明示値を渡す場合は、各項目で「関数引数 > 対応する環境変数 > 派生既定値」の順に優先される。
 VaultとArchiveが存在しない場合、またはInbox/Cardsが既存ファイルだった場合は`ConfigError`で停止する。
+
+## PDF一本の縦切りMVP
+
+安定したテキストPDFを一度に1件だけ処理するCLIを用意している。開発Macでは一時ディレクトリを使う。
+本番のGoogle Drive、iCloud、Vaultのパス設定と実PDFでの確認は、利用者がPCを切り替えた後の
+**MacBook Airデプロイ段階**で行う。
+
+```bash
+# MacBook Airで後から導入する依存
+brew install poppler
+
+# 上記のKH_*_PATHを設定したシェルで、一度に最大1件処理
+python3 -m knowledge_hub.ingest_pdf --once
+```
+
+処理順は次のとおり。
+
+1. Inbox直下のhidden、テンポラリ、書き込み直後のファイルを除き、`.pdf`だけを発見する
+2. SHA-256を計算してローカルJobStoreへ登録し、重複処理を防ぐ
+3. `pdftotext`で埋め込みテキストを抽出する
+4. AgentProviderへ上限付き本文をstdinで渡し、厳格なJSONカード案を受け取る
+5. 原本を`Archive/YYYY/MM/<stem>--<hash8>.pdf`へ確保する
+6. `Cards/YYYY/MM/<stem>--<hash8>.md`をatomic writeする
+7. ArchiveとCardの両方が成功した後だけJobStoreを`completed`にする
+
+Archive/Cardのパスはジョブ作成時刻とcontent hashから決まる。原本移動後にworkerが停止しても、
+stale claimが再投入された後は同じArchive原本から再処理できる。既存Archiveが別hash、または既存Cardが
+別content hashなら上書きせず`output_collision`で失敗する。抽出全文はDBにもカードにも保存しない。
+AIへ渡す文字数を超えた場合は黙って切り捨てず、`truncated: true`と抽出文字数をカードfrontmatterへ残す。
+
+Archive/Cardは出力先と同じディレクトリのhidden一時ファイルへ書き、`flush`と`fsync`の後、出力先を
+直前に再検証して`os.replace`で公開する。hard linkを使わないため、iCloud/Google DriveのFile Provider
+領域でも動かせる。既存Cardが同じcontent hashなら、生成後のユーザー編集を守るためbyte単位でそのまま
+保持する。ArchiveとCardが両方とも正しいhashで既に存在するクラッシュ復旧では、Agentを再実行せず
+`completed`へ短絡する。
+
+JobStoreのclaimはMIME種別で分離され、PDF workerは`application/pdf`だけを取得する。将来同じ台帳へ
+音声・動画workerを追加しても、互いのpending jobを誤って処理しない。
+
+Agent CLIは次の優先順で選ぶ。プロンプトはコマンドライン引数ではなくstdinで渡す。metadataと本文は
+一つのJSON envelopeにし、本文内のタグ風文字列で境界が変わらないようにする。出力は余分な説明や
+コードフェンスを許さないJSON objectとし、必須5項目（`title`, `summary`, `category`, `tags`,
+`key_points`）を検証する。
+
+```bash
+export KH_AGENT_CMD="claude -p"       # 最優先。将来Codex wrapper等へ差替可能
+# export KH_CLAUDE_CMD="claude -p"    # 既存設定との互換fallback
+```
+
+主な安全上限は環境変数で調整できる。
+
+| 環境変数 | 既定 | 内容 |
+|---|---:|---|
+| `KH_PDFTOTEXT_CMD` | `pdftotext` | Popplerコマンド |
+| `KH_PDFTOTEXT_TIMEOUT` | 60秒 | 抽出timeout |
+| `KH_PDF_MAX_BYTES` | 100 MiB | PDF入力上限 |
+| `KH_PDF_MAX_OUTPUT_BYTES` | 16 MiB | 抽出stdout上限 |
+| `KH_PDF_MAX_AGENT_CHARS` | 100,000文字 | Agentへ渡す本文上限 |
+| `KH_PDF_MIN_TEXT_CHARS` | 40文字 | 埋め込み本文の最低有効文字数 |
+| `KH_AGENT_TIMEOUT` | 120秒 | Agent CLI timeout |
+
+スキャンPDFのOCR fallbackはこのMVPでは未実装である。埋め込み本文が閾値未満なら空カードを作らず、
+`PdfNeedsOcrError`を`pdf_needs_ocr`として台帳へ記録する。OCRは次段階で独立adapterとして追加する。
+常駐監視とlaunchd設定もこの段階には含めない。
+
+テストは実際のAIや本番Cloudフォルダを使用せず、fake extractor/providerと一時ディレクトリだけで行う。
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -W error::ResourceWarning -m unittest discover -s tests -v
+```
