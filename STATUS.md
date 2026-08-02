@@ -14,7 +14,7 @@
   実Vault検証はすべてbot MacBook Air側で行う
 
 ## 検証済み（このリポジトリ内）
-- unittest 45本 green（A-03ワーカー、Voice Memos の安全ゲート／再試行、HANDOFFマトリクス、既知クエリの受け入れ関門1を含む）
+- unittest 92本 green（共有ローカルJobStore、A-03ワーカー、Voice Memos の安全ゲート／再試行、HANDOFFマトリクス、既知クエリの受け入れ関門1を含む）
 - CLI end-to-end: ヒット系・0件系・vault不在系・偽LLM・`--json` の全経路
 
 ## 四関門
@@ -35,7 +35,7 @@
   - 検索、Obsidian直リンク、対象選択、二段目要約を備えたRecall PWA
 - Voice Memos 取り込みローカル実装（2026-08-02）
   - 初回 `--baseline-existing` 安全ゲート、安定性2回確認、読み取り専用の原本コピー、失敗時の文字起こし再試行
-  - Archive 原本と `Cards/Audio/` の検索可能カードを作るCLI、mlx-whisper 任意ラッパー、launchdテンプレート
+  - PDFと共通のローカルJobStoreで、Archive原本と共有Cards検索カードを作るCLI、mlx-whisper任意ラッパー、launchdテンプレート
   - MacBook Air の実デバイス、iCloud同期、TCC／フルディスクアクセス、文字起こし品質は未検証
 
 ## 次の一手

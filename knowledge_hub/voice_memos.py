@@ -1,14 +1,12 @@
-"""Apple Voice Memos を Archive と Obsidian Cards に取り込む安全なレーン。
+"""Read-only Apple Voice Memos adapter for the shared local job pipeline.
 
-Voice Memos の同期ディレクトリは読むだけで扱う。初回は明示的な
-``--baseline-existing`` または ``--backfill-existing`` が必要で、意図せず
-過去の録音を大量投入しないようにしている。
+The small JSON state file deliberately records only observations needed to
+protect the Voice Memos source (baseline and two-scan stability).  Job status,
+retries, output paths, and content-hash deduplication belong to ``JobStore``.
 """
 from __future__ import annotations
 
 import argparse
-import errno
-import hashlib
 import json
 import os
 import shlex
@@ -18,28 +16,66 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigError, resolve_vault
+from .config import (
+    ConfigError,
+    PipelinePaths,
+    ensure_pipeline_directories,
+    resolve_pipeline_paths,
+)
+from .ingest_pdf import (
+    OutputCollisionError,
+    SourceUnavailableError,
+    UnsafePathError,
+    _ensure_parent,
+    _is_within,
+    _verify_hash,
+    _write_card_atomic,
+)
+from .job_store import JobRecord, JobStore, sha256_file
 
 
 DEFAULT_SOURCE = Path(
     "~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings"
 ).expanduser()
-DEFAULT_STATE = Path("~/.local/state/knowledge_hub/voice_memos.json").expanduser()
-STATE_VERSION = 1
+DEFAULT_STATE = Path(
+    "~/Library/Application Support/Datapipeline_Multi/voice_memos_observations.json"
+).expanduser()
+STATE_VERSION = 2
+AUDIO_MEDIA_TYPE = "audio/mp4"
 
 
 class SourcePermissionError(RuntimeError):
     """Voice Memos のTCC/Full Disk Accessにより読めない。"""
 
 
+class AudioTranscriptionError(RuntimeError):
+    """A safe, retryable transcription failure."""
+
+
+@dataclass(frozen=True)
+class AudioOutputPaths:
+    archive: Path
+    card: Path
+
+
+@dataclass(frozen=True)
+class AudioProcessResult:
+    content_hash: str
+    status: str
+    archived_path: Path | None = None
+    card_path: Path | None = None
+    error_code: str | None = None
+
+
 @dataclass
 class ScanReport:
     discovered: int = 0
     pending: int = 0
+    registered: int = 0
     archived: int = 0
     cards: int = 0
     retried: int = 0
@@ -55,12 +91,11 @@ def _key(relative: Path, size: int, mtime_ns: int) -> str:
     return "{}\0{}\0{}".format(relative.as_posix(), size, mtime_ns)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _empty_state(*, baseline_cutover_mtime_ns: int | None = None) -> dict[str, Any]:
+    state: dict[str, Any] = {"version": STATE_VERSION, "items": {}}
+    if baseline_cutover_mtime_ns is not None:
+        state["baseline_cutover_mtime_ns"] = baseline_cutover_mtime_ns
+    return state
 
 
 def _load_state(path: Path) -> dict[str, Any] | None:
@@ -68,13 +103,35 @@ def _load_state(path: Path) -> dict[str, Any] | None:
         return None
     try:
         with path.open(encoding="utf-8") as stream:
-            state = json.load(stream)
+            raw = json.load(stream)
     except (OSError, json.JSONDecodeError) as exc:
-        raise ConfigError("Voice Memos の状態ファイルを読めません: {}".format(exc))
-    if not isinstance(state, dict) or state.get("version") != STATE_VERSION:
-        raise ConfigError("Voice Memos の状態ファイル形式が不正です: {}".format(path))
-    if not isinstance(state.get("items"), dict):
-        raise ConfigError("Voice Memos の状態ファイル形式が不正です: {}".format(path))
+        raise ConfigError("Voice Memos の観測状態ファイルを読めません: {}".format(exc))
+    if not isinstance(raw, dict) or raw.get("version") not in (1, STATE_VERSION):
+        raise ConfigError("Voice Memos の観測状態ファイル形式が不正です: {}".format(path))
+    raw_items = raw.get("items")
+    if not isinstance(raw_items, dict):
+        raise ConfigError("Voice Memos の観測状態ファイル形式が不正です: {}".format(path))
+    # v1 stored processing fields before the shared JobStore existed.  Drop
+    # those fields on read; this JSON must never be a second processing ledger.
+    state = _empty_state()
+    cutover = raw.get("baseline_cutover_mtime_ns")
+    if isinstance(cutover, int):
+        state["baseline_cutover_mtime_ns"] = cutover
+    for item_key, item in raw_items.items():
+        if not isinstance(item_key, str) or not isinstance(item, dict):
+            continue
+        source_rel = item.get("source_rel")
+        size = item.get("size")
+        mtime_ns = item.get("mtime_ns")
+        if not isinstance(source_rel, str) or not isinstance(size, int) or not isinstance(mtime_ns, int):
+            continue
+        state["items"][item_key] = {
+            "source_rel": source_rel,
+            "size": size,
+            "mtime_ns": mtime_ns,
+            "status": "baselined" if item.get("status") == "baselined" else "observing",
+            "stable_scans": int(item.get("stable_scans", 2)),
+        }
     return state
 
 
@@ -94,7 +151,6 @@ def _save_state(path: Path, state: dict[str, Any]) -> None:
 
 
 def _iter_recordings(source: Path) -> list[Path]:
-    """m4aだけを列挙し、os.walkの隠された権限エラーも利用者に返す。"""
     try:
         if not source.is_dir():
             raise ConfigError("Voice Memos のソースが見つからない: {}".format(source))
@@ -119,8 +175,7 @@ def _iter_recordings(source: Path) -> list[Path]:
 
 
 def _yaml_scalar(value: str) -> str:
-    """recall._frontmatter が読める単一行の、控えめなYAML scalar。"""
-    return '"{}"'.format(value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " "))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _excerpt(transcript: str, limit: int = 160) -> str:
@@ -130,166 +185,187 @@ def _excerpt(transcript: str, limit: int = 160) -> str:
     return compact[:limit - 1] + "…" if len(compact) > limit else compact
 
 
-def _atomic_copy(source: Path, destination: Path, expected_sha256: str) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        if _sha256(destination) == expected_sha256:
-            return
-        raise RuntimeError("アーカイブ名の衝突を検出しました")
-    fd, temporary = tempfile.mkstemp(prefix=".voice-memo-", suffix=".part", dir=str(destination.parent))
-    try:
-        with os.fdopen(fd, "wb") as target, source.open("rb") as origin:
-            shutil.copyfileobj(origin, target, length=1024 * 1024)
-            target.flush()
-            os.fsync(target.fileno())
-        if _sha256(Path(temporary)) != expected_sha256:
-            raise RuntimeError("コピー中に録音の内容が変化しました。次回再試行します")
-        try:
-            os.link(temporary, destination)
-        except FileExistsError:
-            if _sha256(destination) != expected_sha256:
-                raise RuntimeError("アーカイブ名の衝突を検出しました")
-        except OSError as exc:
-            # 一部のクラウド File Provider は hard link を実装しない。通常の
-            # launchd は単一プロセスなので、存在再確認の上で同じディレクトリ内の
-            # atomic replace にフォールバックする。
-            if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM):
-                raise
-            if destination.exists():
-                if _sha256(destination) != expected_sha256:
-                    raise RuntimeError("アーカイブ名の衝突を検出しました")
-            else:
-                os.replace(temporary, destination)
-                temporary = ""
-        else:
-            os.unlink(temporary)
-            temporary = ""
-    finally:
-        if temporary and os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def _archive_path(archive: Path, source_stat_mtime_ns: int, sha256: str) -> Path:
-    captured = datetime.fromtimestamp(source_stat_mtime_ns / 1_000_000_000)
-    month = captured.strftime("%Y-%m")
-    stem = captured.strftime("%m%d_%H%M_voice-memo_") + sha256[:10]
-    return archive / month / (stem + ".m4a")
-
-
 def _run_transcriber(command: str | None, audio: Path, timeout: float = 7200.0) -> str:
     if not command:
-        raise RuntimeError("文字起こしコマンド未設定 (KH_AUDIO_TRANSCRIBE_CMD または --transcribe-cmd)")
+        raise AudioTranscriptionError("audio_transcriber_not_configured")
     try:
         argv = shlex.split(command)
-    except ValueError as exc:
-        raise RuntimeError("文字起こしコマンドを解釈できません: {}".format(exc))
+    except ValueError:
+        raise AudioTranscriptionError("audio_transcriber_invalid_command")
     if not argv:
-        raise RuntimeError("文字起こしコマンド未設定 (KH_AUDIO_TRANSCRIBE_CMD)")
+        raise AudioTranscriptionError("audio_transcriber_not_configured")
     try:
         result = subprocess.run(argv + [str(audio)], text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, check=False, timeout=timeout)
     except subprocess.TimeoutExpired:
-        # timeout の例外文字列にはコマンドやパスが含まれ得るため載せない。
-        raise RuntimeError("文字起こしコマンドが時間切れになりました。次回再試行します")
-    except OSError as exc:
-        raise RuntimeError("文字起こしコマンドを実行できません: {}".format(exc))
+        raise AudioTranscriptionError("audio_transcription_timeout")
+    except OSError:
+        raise AudioTranscriptionError("audio_transcriber_unavailable")
     if result.returncode != 0:
-        # stderrは録音内容を含み得るので、状態・ログに載せない。
-        raise RuntimeError("文字起こしコマンドが終了コード {} で失敗しました".format(result.returncode))
+        # Child stderr can contain sensitive transcript/source details; never retain it.
+        raise AudioTranscriptionError("audio_transcription_failed")
     return result.stdout.strip()
 
 
-def _atomic_card(vault: Path, archived_rel: Path, sha256: str, source_mtime_ns: int,
-                 transcript: str) -> Path:
-    captured = datetime.fromtimestamp(source_mtime_ns / 1_000_000_000)
-    date_part = captured.strftime("%Y-%m")
-    filename = captured.strftime("%m%d_%H%M_voice-memo_") + sha256[:10] + ".md"
-    destination = vault / "Cards" / "Audio" / date_part / filename
-    title = "Voice Memo {}".format(captured.strftime("%Y-%m-%d %H:%M"))
-    content = "\n".join((
-        "---",
-        "title: {}".format(_yaml_scalar(title)),
-        "captured_at: {}".format(_yaml_scalar(captured.isoformat(timespec="seconds"))),
-        "summary: {}".format(_yaml_scalar(_excerpt(transcript))),
-        "source_type: audio",
-        "source_app: voice_memos",
-        "source_path: {}".format(_yaml_scalar(archived_rel.as_posix())),
-        "source_sha256: {}".format(_yaml_scalar(sha256)),
-        "---",
-        "",
-        "## Original",
-        "",
-        "`{}`".format(archived_rel.as_posix()),
-        "",
-        "## Transcript",
-        "",
-        transcript,
-        "",
-    ))
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        # short-id の理論上の衝突でも別カードを壊さない。
-        existing = destination.read_text(encoding="utf-8", errors="replace")
-        if "source_sha256: {}".format(_yaml_scalar(sha256)) in existing:
-            return destination
-        destination = destination.with_name(
-            captured.strftime("%m%d_%H%M_voice-memo_") + sha256[:16] + ".md"
-        )
-        if destination.exists():
-            existing = destination.read_text(encoding="utf-8", errors="replace")
-            if "source_sha256: {}".format(_yaml_scalar(sha256)) in existing:
-                return destination
-            raise RuntimeError("カード名の衝突を検出しました")
-    fd, temporary = tempfile.mkstemp(prefix=".voice-memo-", suffix=".md", dir=str(destination.parent))
+def audio_output_paths(job: JobRecord, paths: PipelinePaths) -> AudioOutputPaths:
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, destination)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM):
-                raise
-            if not destination.exists():
-                os.replace(temporary, destination)
-                temporary = ""
+        created = datetime.fromisoformat(job.created_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("audio_job_invalid_created_at") from exc
+    # Do not expose a Voice Memo's private recording name in output paths.
+    filename = "voice-memo--{}".format(job.content_hash[:8])
+    archive = paths.archive / "{:04d}".format(created.year) / "{:02d}".format(created.month) / (filename + ".m4a")
+    card = paths.cards / "{:04d}".format(created.year) / "{:02d}".format(created.month) / (filename + ".md")
+    if not _is_within(archive.resolve(strict=False), paths.archive.resolve(strict=True)):
+        raise UnsafePathError("audio archive destination crossed its configured boundary")
+    if not _is_within(card.resolve(strict=False), paths.cards.resolve(strict=True)):
+        raise UnsafePathError("audio card destination crossed its configured boundary")
+    return AudioOutputPaths(archive, card)
+
+
+def _copy_to_archive(source: Path, destination: Path, expected_hash: str, archive_root: Path) -> Path:
+    """Atomically copy without ever unlinking, renaming, or editing the source."""
+    _ensure_parent(destination, archive_root)
+    if destination.exists() or destination.is_symlink():
+        _verify_hash(destination, expected_hash)
+        return destination
+    source_stat = source.stat()
+    handle = tempfile.NamedTemporaryFile(mode="w+b", prefix=".audio-ingest-", suffix=".tmp",
+                                         dir=destination.parent, delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle, source.open("rb") as source_file:
+            shutil.copyfileobj(source_file, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Set metadata only after all buffered content is durable: a buffered
+        # flush can otherwise overwrite the preserved source mtime. The Archive
+        # copy is the retry source, so this keeps captured_at stable on retry.
+        os.utime(temporary, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        _verify_hash(temporary, expected_hash)
+        if destination.exists() or destination.is_symlink():
+            _verify_hash(destination, expected_hash)
         else:
-            os.unlink(temporary)
-            temporary = ""
+            os.replace(temporary, destination)
     finally:
-        if temporary and os.path.exists(temporary):
-            os.unlink(temporary)
+        temporary.unlink(missing_ok=True)
     return destination
 
 
-class VoiceMemosIngestor:
-    """状態を保持して、安定済みの録音だけを段階的に処理する。"""
+def _locate_source(job: JobRecord, paths: PipelinePaths, source_root: Path,
+                   output: AudioOutputPaths) -> Path:
+    if output.archive.exists() or output.archive.is_symlink():
+        _verify_hash(output.archive, job.content_hash)
+        return output.archive
+    source = Path(job.source_path)
+    if source.is_symlink() or not source.is_file():
+        raise SourceUnavailableError("audio_source_unavailable")
+    try:
+        resolved = source.resolve(strict=True)
+    except OSError as exc:
+        raise SourceUnavailableError("audio_source_unavailable") from exc
+    if not _is_within(resolved, source_root.resolve(strict=True)):
+        raise UnsafePathError("audio source crossed its configured boundary")
+    try:
+        if sha256_file(source) != job.content_hash:
+            raise SourceUnavailableError("audio_source_changed")
+    except OSError as exc:
+        raise SourceUnavailableError("audio_source_unavailable") from exc
+    return source
 
-    def __init__(self, source: Path, archive: Path, vault: Path, state_path: Path,
+
+def render_audio_card(job: JobRecord, archive_relative: Path, transcript: str,
+                      captured_at: str) -> str:
+    frontmatter = {
+        "id": "audio-" + job.content_hash,
+        "content_hash": job.content_hash,
+        "title": "Voice Memo " + captured_at.replace("T", " ")[:16],
+        "captured_at": captured_at,
+        "summary": _excerpt(transcript),
+        "source_type": "audio",
+        "source_app": "voice_memos",
+        "source_path": archive_relative.as_posix(),
+        "source_sha256": job.content_hash,
+    }
+    lines = ["---"]
+    lines.extend("{}: {}".format(key, _yaml_scalar(str(value))) for key, value in frontmatter.items())
+    lines.extend(["---", "", "## Original", "", "`{}`".format(archive_relative.as_posix()),
+                  "", "## Transcript", "", transcript, ""])
+    return "\n".join(lines)
+
+
+def _audio_failure_code(error: Exception) -> str:
+    if isinstance(error, AudioTranscriptionError):
+        return str(error)
+    if isinstance(error, OutputCollisionError):
+        return "output_collision"
+    if isinstance(error, UnsafePathError):
+        return "unsafe_path"
+    if isinstance(error, SourceUnavailableError):
+        return "audio_source_unavailable"
+    return "audio_processing_failed"
+
+
+def process_one_audio(paths: PipelinePaths, store: JobStore, source_root: Path, *,
+                      transcribe_command: str | None, transcribe_timeout: float = 7200.0,
+                      max_attempts: int = 3) -> AudioProcessResult | None:
+    """Claim exactly one ``audio/mp4`` job; PDF jobs remain untouched."""
+    job = store.claim_next(max_attempts=max_attempts, media_type=AUDIO_MEDIA_TYPE)
+    if job is None:
+        return None
+    try:
+        output = audio_output_paths(job, paths)
+        if output.archive.exists() or output.archive.is_symlink():
+            _verify_hash(output.archive, job.content_hash)
+            if output.card.exists() or output.card.is_symlink():
+                from .ingest_pdf import _existing_card_hash
+                if _existing_card_hash(output.card) != job.content_hash:
+                    raise OutputCollisionError("audio_card_collision")
+                store.mark_completed(job.content_hash, output.archive, output.card)
+                return AudioProcessResult(job.content_hash, "completed", output.archive, output.card)
+        source = _locate_source(job, paths, source_root, output)
+        archived = _copy_to_archive(source, output.archive, job.content_hash, paths.archive)
+        transcript = _run_transcriber(transcribe_command, archived, transcribe_timeout)
+        captured_at = datetime.fromtimestamp(archived.stat().st_mtime, timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        content = render_audio_card(job, archived.relative_to(paths.archive), transcript, captured_at)
+        _write_card_atomic(output.card, content, job.content_hash, paths.cards)
+        store.mark_completed(job.content_hash, archived, output.card)
+        return AudioProcessResult(job.content_hash, "completed", archived, output.card)
+    except Exception as error:
+        code = _audio_failure_code(error)
+        # Codes are deliberately fixed vocabulary; no source name, child stderr,
+        # transcript, or exception text enters SQLite.
+        store.mark_failed(job.content_hash, code)
+        return AudioProcessResult(job.content_hash, "failed", error_code=code)
+
+
+class VoiceMemosIngestor:
+    """Observe the source and submit stable recordings to the shared JobStore."""
+
+    def __init__(self, source: Path, paths: PipelinePaths, state_path: Path,
                  settle_seconds: float = 60.0, transcribe_command: str | None = None,
-                 transcribe_timeout: float = 7200.0):
+                 transcribe_timeout: float = 7200.0, max_attempts: int = 3,
+                 stale_after_seconds: float = 900.0):
         self.source = source.expanduser()
-        self.archive = archive.expanduser()
-        self.vault = vault.expanduser()
+        self.paths = paths
         self.state_path = state_path.expanduser()
         self.settle_seconds = max(0.0, settle_seconds)
         self.transcribe_command = transcribe_command
         self.transcribe_timeout = transcribe_timeout
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if stale_after_seconds < 0:
+            raise ValueError("stale_after_seconds must not be negative")
+        self.max_attempts = max_attempts
+        self.stale_after_seconds = stale_after_seconds
 
     def baseline_existing(self) -> ScanReport:
         if self.state_path.exists():
-            raise ConfigError("状態ファイルが既にあります。--baseline-existing は初回だけ指定できます。")
+            raise ConfigError("観測状態ファイルが既にあります。--baseline-existing は初回だけ指定できます。")
         report = ScanReport()
-        # 同期完了が遅れた旧録音も、この時点以前の更新日時なら基準化する。
-        # これは防御層であり、初回iCloud同期を待つ運用は引き続き必須。
-        state: dict[str, Any] = {
-            "version": STATE_VERSION,
-            "baseline_cutover_mtime_ns": time.time_ns(),
-            "items": {},
-        }
+        state = _empty_state(baseline_cutover_mtime_ns=time.time_ns())
         for item in _iter_recordings(self.source):
             try:
                 size, mtime_ns = _stat_signature(item)
@@ -311,18 +387,21 @@ class VoiceMemosIngestor:
                 "Voice Memos 初回設定です。過去の録音を取り込まない場合は "
                 "--baseline-existing（推奨）、過去分も取り込む場合だけ --backfill-existing を明示してください。"
             )
+        ensure_pipeline_directories(self.paths)
+        store = JobStore(self.paths.state_db)
+        # A killed long-running transcription cannot mark_failed. Return its
+        # shared claim to pending before the audio-only claim below; MIME
+        # filtering still prevents this adapter from claiming PDF work.
+        store.requeue_stale_processing(
+            stale_after=timedelta(seconds=self.stale_after_seconds)
+        )
         report = ScanReport()
-        now = time.time() if now is None else now
+        observed_at = time.time() if now is None else now
         items: dict[str, Any] = state["items"]
-        # 文字起こしだけ失敗したものは、元の Voice Memo が後で変更・削除されても
-        # Archive の確定コピーから再試行できる。
-        for item in items.values():
-            if item.get("status") == "archived" and not item.get("card_path"):
-                self._complete_archived(item, report)
         for source_file in _iter_recordings(self.source):
             try:
                 size, mtime_ns = _stat_signature(source_file)
-            except (FileNotFoundError, PermissionError, OSError):
+            except OSError:
                 continue
             relative = source_file.relative_to(self.source)
             item_key = _key(relative, size, mtime_ns)
@@ -330,82 +409,49 @@ class VoiceMemosIngestor:
             item = items.get(item_key)
             if item is None:
                 cutover = state.get("baseline_cutover_mtime_ns")
-                if isinstance(cutover, int) and mtime_ns <= cutover:
-                    items[item_key] = {
-                        "source_rel": relative.as_posix(), "size": size, "mtime_ns": mtime_ns,
-                        "status": "baselined", "stable_scans": 2,
-                    }
-                    continue
+                status = "baselined" if isinstance(cutover, int) and mtime_ns <= cutover else "observing"
                 item = {"source_rel": relative.as_posix(), "size": size, "mtime_ns": mtime_ns,
-                        "status": "pending", "stable_scans": 1}
+                        "status": status, "stable_scans": 2 if status == "baselined" else 1}
                 items[item_key] = item
+                if status == "baselined":
+                    continue
                 report.pending += 1
                 continue
-            if item.get("status") in ("baselined", "completed"):
+            if item.get("status") == "baselined":
                 continue
-            if item.get("status") == "pending":
-                item["stable_scans"] = int(item.get("stable_scans", 0)) + 1
-                age = now - (mtime_ns / 1_000_000_000)
-                if item["stable_scans"] < 2 or age < self.settle_seconds:
-                    report.pending += 1
-                    continue
-            self._process(source_file, item, report)
+            item["stable_scans"] = min(2, int(item.get("stable_scans", 0)) + 1)
+            age = observed_at - (mtime_ns / 1_000_000_000)
+            if item["stable_scans"] < 2 or age < self.settle_seconds:
+                report.pending += 1
+                continue
+            try:
+                before = _stat_signature(source_file)
+                digest = sha256_file(source_file)
+                after = _stat_signature(source_file)
+            except OSError:
+                report.pending += 1
+                continue
+            if before != after or before != (size, mtime_ns):
+                item["stable_scans"] = 1
+                report.pending += 1
+                continue
+            _, created = store.register(digest, source_file, original_name="voice-memo.m4a",
+                                       size_bytes=size, media_type=AUDIO_MEDIA_TYPE)
+            if created:
+                report.registered += 1
+        result = process_one_audio(self.paths, store, self.source,
+                                   transcribe_command=self.transcribe_command,
+                                   transcribe_timeout=self.transcribe_timeout,
+                                   max_attempts=self.max_attempts)
+        if result is not None:
+            if result.status == "completed":
+                report.archived += 1
+                report.cards += 1
+            else:
+                report.retried += 1
+                report.errors.append("Voice Memos 処理保留: {}".format(result.error_code))
         _save_state(self.state_path, state)
         return report
-
-    def _process(self, source_file: Path, item: dict[str, Any], report: ScanReport) -> None:
-        try:
-            # Hashの前後で同じstatであることを確認し、同期途中の内容を採用しない。
-            before = _stat_signature(source_file)
-            digest = item.get("sha256") or _sha256(source_file)
-            after = _stat_signature(source_file)
-            if before != after or before != (item["size"], item["mtime_ns"]):
-                item["status"] = "pending"
-                item["stable_scans"] = 1
-                return
-            if item.get("archive_rel"):
-                archive_file = self.archive / item["archive_rel"]
-            else:
-                archive_file = _archive_path(self.archive, item["mtime_ns"], digest)
-                if archive_file.exists() and _sha256(archive_file) != digest:
-                    archive_file = archive_file.with_name(
-                        archive_file.stem + "-" + digest[10:16] + archive_file.suffix
-                    )
-            _atomic_copy(source_file, archive_file, digest)
-            if not item.get("archive_rel"):
-                report.archived += 1
-            item["sha256"] = digest
-            item["archive_rel"] = archive_file.relative_to(self.archive).as_posix()
-            item["status"] = "archived"
-            self._complete_archived(item, report)
-        except RuntimeError as exc:
-            # RuntimeError はこのモジュールで要約した安全な状態だけを含む。
-            report.errors.append("Voice Memos 処理保留: {}".format(exc))
-        except OSError:
-            # OSError 文字列には録音ファイル名が含まれ得るため出力しない。
-            report.errors.append("Voice Memos 処理保留: ファイル操作に失敗しました。次回再試行します")
-
-    def _complete_archived(self, item: dict[str, Any], report: ScanReport) -> None:
-        """Archive 済みの1件を文字起こしし、カード作成だけを再試行する。"""
-        if item.get("card_path"):
-            item["status"] = "completed"
-            return
-        try:
-            archive_file = self.archive / item["archive_rel"]
-            if not archive_file.is_file():
-                raise RuntimeError("Archive 済み原本が見つかりません")
-            report.retried += 1
-            transcript = _run_transcriber(self.transcribe_command, archive_file,
-                                          self.transcribe_timeout)
-            card = _atomic_card(self.vault, Path(item["archive_rel"]), item["sha256"],
-                                item["mtime_ns"], transcript)
-            item["card_path"] = str(card)
-            item["status"] = "completed"
-            report.cards += 1
-        except RuntimeError as exc:
-            report.errors.append("Voice Memos 処理保留: {}".format(exc))
-        except OSError:
-            report.errors.append("Voice Memos 処理保留: ファイル操作に失敗しました。次回再試行します")
 
 
 def _resolve_source(value: str | None) -> Path:
@@ -413,7 +459,6 @@ def _resolve_source(value: str | None) -> Path:
     try:
         if not source.is_dir():
             raise ConfigError("Voice Memos のソースが見つからない: {}".format(source))
-        # is_dir() は権限拒否を False に畳むことがあるので、TCC を明示的に判定する。
         with os.scandir(source):
             pass
     except PermissionError as exc:
@@ -421,29 +466,22 @@ def _resolve_source(value: str | None) -> Path:
     return source
 
 
-def _resolve_archive(value: str | None) -> Path:
-    raw = value or os.environ.get("KH_ARCHIVE_PATH")
-    if not raw:
-        raise ConfigError("Archive を --archive または環境変数 KH_ARCHIVE_PATH で指定してください。")
-    archive = Path(raw).expanduser()
-    if archive.exists() and not archive.is_dir():
-        raise ConfigError("Archive がディレクトリではありません: {}".format(archive))
-    return archive
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Voice Memos を Archive と Obsidian Cards へ安全に取り込む")
+    parser = argparse.ArgumentParser(description="Voice Memos を共有ArchiveとObsidian Cardsへ安全に取り込む")
     parser.add_argument("--once", action="store_true", help="1回だけ走査する")
     parser.add_argument("--watch", action="store_true", help="継続してポーリングする（既定）")
     parser.add_argument("--interval", type=float, default=30.0)
     parser.add_argument("--source")
     parser.add_argument("--archive")
     parser.add_argument("--vault")
+    parser.add_argument("--cards")
+    parser.add_argument("--state-db")
     parser.add_argument("--state", default=os.environ.get("KH_VOICE_MEMOS_STATE"))
     parser.add_argument("--settle-seconds", type=float, default=60.0)
     parser.add_argument("--transcribe-timeout", type=float,
-                        default=os.environ.get("KH_AUDIO_TRANSCRIBE_TIMEOUT", "7200"),
-                        help="文字起こし1件の上限秒数（既定: 7200）")
+                        default=os.environ.get("KH_AUDIO_TRANSCRIBE_TIMEOUT", "7200"))
+    parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--stale-after-seconds", type=float, default=900.0)
     first_run = parser.add_mutually_exclusive_group()
     first_run.add_argument("--baseline-existing", action="store_true")
     first_run.add_argument("--backfill-existing", action="store_true")
@@ -451,26 +489,36 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         source = _resolve_source(args.source)
-        archive = _resolve_archive(args.archive)
-        vault = resolve_vault(args.vault)
+        paths = resolve_pipeline_paths(args.vault, archive_value=args.archive,
+                                       cards_value=args.cards, state_db_value=args.state_db)
         if args.transcribe_timeout <= 0:
             raise ConfigError("--transcribe-timeout は0より大きい秒数を指定してください。")
+        if args.max_attempts <= 0:
+            raise ConfigError("--max-attempts は1以上を指定してください。")
+        if args.stale_after_seconds < 0:
+            raise ConfigError("--stale-after-seconds は0以上を指定してください。")
         state_path = Path(args.state).expanduser() if args.state else DEFAULT_STATE
-        ingestor = VoiceMemosIngestor(source, archive, vault, state_path, args.settle_seconds,
-                                      args.transcribe_cmd, args.transcribe_timeout)
+        ingestor = VoiceMemosIngestor(source, paths, state_path, args.settle_seconds,
+                                      args.transcribe_cmd, args.transcribe_timeout,
+                                      args.max_attempts, args.stale_after_seconds)
         if args.baseline_existing:
             report = ingestor.baseline_existing()
             print("既存の Voice Memos {} 件を基準化しました。過去分は取り込みません。".format(report.discovered))
             return 0
-        if args.backfill_existing and not state_path.exists():
-            _save_state(state_path, {"version": STATE_VERSION, "items": {}})
+        if args.backfill_existing:
+            if state_path.exists():
+                raise ConfigError(
+                    "既存の観測状態には --backfill-existing を使えません。"
+                    "意図的に過去分を再投入する場合は、状態JSONを退避してから実行してください。"
+                )
+            _save_state(state_path, _empty_state())
             print("過去の Voice Memos の取り込みを開始します（安定確認後に処理）。", file=sys.stderr)
         while True:
             report = ingestor.scan_once()
             for error in report.errors:
                 print(error, file=sys.stderr)
             if args.once:
-                return 0
+                return 1 if report.errors else 0
             time.sleep(max(0.5, args.interval))
     except SourcePermissionError:
         print("Voice Memos を読めません。実行する Python/launchd にフルディスクアクセスを付与し、"

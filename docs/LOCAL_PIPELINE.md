@@ -142,6 +142,16 @@ export KH_AGENT_CMD="claude -p"       # 最優先。将来Codex wrapper等へ差
 `PdfNeedsOcrError`を`pdf_needs_ocr`として台帳へ記録する。OCRは次段階で独立adapterとして追加する。
 常駐監視とlaunchd設定もこの段階には含めない。
 
+## Voice Memos adapter
+
+`knowledge_hub.voice_memos` はiCloud同期済みVoice Memosの `Recordings` を**読み取り専用**で監視するadapterである。共有の `resolve_pipeline_paths()` と `ensure_pipeline_directories()` を使うため、PDFと同じ既存Archive、Cards、ローカル状態DBを使う。Archiveはworkerが作らず、既存の `KH_ARCHIVE_PATH` が必須である。
+
+安定した新規または更新済み `.m4a` はSHA-256で `JobStore` に `media_type='audio/mp4'` として登録される。audio workerはこのMIME種別だけをclaimするので、PDF pending jobには触れない。原本は `Archive/YYYY/MM/voice-memo--<hash8>.m4a`、カードは `Cards/YYYY/MM/voice-memo--<hash8>.md` にatomicに公開し、両方がある後だけcompletedにする。文字起こし失敗時は安全な短いエラーcodeだけをfailed jobへ記録し、Archive原本から再試行する。transcriptや録音内容はSQLiteへ保存しない。
+
+Voice Memos固有の `KH_VOICE_MEMOS_STATE` JSON はJobStoreとは別である。既定は共有SQLiteの隣、`~/Library/Application Support/Datapipeline_Multi/voice_memos_observations.json` である。これは初回baseline、同期遅延cutover、同一statを二回観測する安定性だけを保持し、content hash、attempt、failed/completed、出力パスを保存しない。初回には `--baseline-existing`（推奨）または明示的な `--backfill-existing` が必要である。baseline済みstateへのbackfill指定は拒否するため、意図的な過去分再投入では先にJSONを退避する。
+
+文字起こしコマンドは `KH_AUDIO_TRANSCRIBE_CMD`（または `--transcribe-cmd`）をshlexでargv化し、Archiveコピーのパスを最後の引数として渡す。stdoutだけをtranscriptとして使い、既定7200秒のtimeoutは `KH_AUDIO_TRANSCRIBE_TIMEOUT` または `--transcribe-timeout` で調整できる。`--max-attempts` は失敗jobの最大claim回数（既定3）、`--stale-after-seconds` は強制終了したprocessing claimを再投入する猶予（既定900秒）である。TCC/Full Disk Accessとlaunchdの導入手順は [Voice Memos デプロイチェックリスト](VOICE_MEMOS_DEPLOY_CHECKLIST.md) を参照。
+
 テストは実際のAIや本番Cloudフォルダを使用せず、fake extractor/providerと一時ディレクトリだけで行う。
 
 ```bash

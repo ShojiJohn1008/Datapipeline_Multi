@@ -17,6 +17,8 @@
     <key>KH_VOICE_MEMOS_PATH</key><string>__VOICE_MEMOS_RECORDINGS_PATH__</string>
     <key>KH_ARCHIVE_PATH</key><string>__ARCHIVE_ABSOLUTE_PATH__</string>
     <key>KH_VAULT_PATH</key><string>__VAULT_ABSOLUTE_PATH__</string>
+    <key>KH_CARDS_PATH</key><string>__CARDS_ABSOLUTE_PATH__</string>
+    <key>KH_STATE_DB_PATH</key><string>__STATE_DB_ABSOLUTE_PATH__</string>
     <key>KH_VOICE_MEMOS_STATE</key><string>__STATE_ABSOLUTE_PATH__</string>
     <key>KH_AUDIO_TRANSCRIBE_CMD</key><string>__TRANSCRIBER_COMMAND__</string>
   </dict>
