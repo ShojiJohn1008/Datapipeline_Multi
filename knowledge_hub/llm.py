@@ -14,6 +14,22 @@ from pathlib import Path
 
 from .vault_search import FileResult
 
+
+class LlmInvocationError(RuntimeError):
+    """秘密情報やプロンプト本文を含めずにCLI失敗種別を伝える。"""
+
+
+class LlmTimeoutError(LlmInvocationError):
+    """LLM CLIが制限時間内に終了しなかった。"""
+
+
+class LlmCommandNotFoundError(LlmInvocationError):
+    """設定されたLLM CLIを起動できなかった。"""
+
+
+class LlmCommandFailedError(LlmInvocationError):
+    """LLM CLIが非ゼロ終了した。"""
+
 # プロンプト（凍結）
 EXPAND_PROMPT = """あなたは検索語展開器。個人のObsidian Vault（日本語・英語混在の.mdノート）を
 ripgrepでOR検索するための類語・言い換え・関連表現を3〜5個生成せよ。
@@ -38,9 +54,15 @@ ANSWER_PROMPT = """あなたは個人ノート検索の回答生成器。以下�
 def call_claude(prompt: str, timeout: float) -> str:
     """`claude -p`（または KH_CLAUDE_CMD）に prompt を渡し stdout を返す。失敗は例外。"""
     cmd = shlex.split(os.environ.get("KH_CLAUDE_CMD", "claude -p")) + [prompt]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise LlmTimeoutError("LLM CLI timed out") from exc
+    except FileNotFoundError as exc:
+        raise LlmCommandNotFoundError("LLM CLI command was not found") from exc
     if proc.returncode != 0:
-        raise RuntimeError(f"LLM呼び出し失敗(code={proc.returncode}): {proc.stderr[:200]}")
+        # stderrにはCLIがプロンプトを再掲する場合があるため、終了コードだけを残す。
+        raise LlmCommandFailedError(f"LLM CLI exited with code {proc.returncode}")
     return proc.stdout.strip()
 
 

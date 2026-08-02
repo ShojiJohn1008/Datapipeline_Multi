@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from . import config
+from .capture import CaptureError, capture_intent_card
 from .find import normalize_query, relax_terms
-from .llm import call_claude
+from .llm import (
+    LlmCommandFailedError,
+    LlmCommandNotFoundError,
+    LlmTimeoutError,
+    call_claude,
+)
 from .vault_search import extract_snippet, obsidian_link, run_ripgrep, score_files
 
 SUMMARY_PROMPT = """あなたは個人ノート検索の要約器。以下はユーザー自身の過去の記録です。
@@ -56,6 +63,15 @@ def search_cards(query: str, vault: Path, limit: int = 10) -> dict[str, object]:
     base = normalize_query(query)
     terms = relax_terms([base])
     hits, timed_out = run_ripgrep(terms, vault, timeout=config.RG_TIMEOUT)
+    scope = os.environ.get("KH_RECALL_SEARCH_SCOPE", "cards").strip().lower()
+    if scope not in {"cards", "vault"}:
+        return {"query": query, "cards": [], "total": 0, "partial": False,
+                "error": "KH_RECALL_SEARCH_SCOPEはcardsまたはvaultで指定してください"}
+    if scope == "cards":
+        hits = {
+            rel: value for rel, value in hits.items()
+            if Path(rel).parts and Path(rel).parts[0] == "Cards"
+        }
     ranked = score_files(hits, vault)[:limit]
     cards = []
     for result in ranked:
@@ -102,17 +118,33 @@ def summarize_cards(query: str, ids: list[str], vault: Path) -> dict[str, object
         blocks.append(f"[{index}] {rel}\n{snippet}")
         sources.append({"id": rel, "title": _frontmatter(path).get("title", path.stem)})
     try:
+        timeout = config.positive_float_env(
+            "KH_RECALL_ANSWER_TIMEOUT", config.RECALL_ANSWER_TIMEOUT
+        )
         answer = call_claude(
             SUMMARY_PROMPT.format(query=query, excerpts="\n\n".join(blocks)),
-            timeout=config.ANSWER_TIMEOUT,
+            timeout=timeout,
         )
+    except LlmTimeoutError:
+        error = "要約CLIがタイムアウトしました"
+    except LlmCommandNotFoundError:
+        error = "要約CLIが見つかりません"
+    except LlmCommandFailedError:
+        error = "要約CLIがエラー終了しました"
     except Exception:
-        return {"query": query, "answer": None, "sources": sources, "error": "要約機能でエラー"}
-    return {"query": query, "answer": answer, "sources": sources}
+        error = "要約機能でエラー"
+    else:
+        return {"query": query, "answer": answer, "sources": sources}
+    return {"query": query, "answer": None, "sources": sources, "error": error}
 
 
 def handle_request(payload: dict[str, object], vault: Path) -> dict[str, object]:
     request_type = payload.get("type")
+    if request_type == "capture":
+        try:
+            return capture_intent_card(payload.get("card"), vault)
+        except CaptureError as exc:
+            return {"error": str(exc)}
     query = payload.get("query")
     if not isinstance(query, str) or not query.strip():
         return {"error": "queryが必要です"}
