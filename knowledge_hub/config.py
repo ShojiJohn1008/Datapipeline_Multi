@@ -20,6 +20,11 @@ ANSWER_TIMEOUT = 20.0   # 回答生成LLM
 TOTAL_BUDGET = 60.0     # 全体フェイルセーフ
 MIN_ANSWER_BUDGET = 5.0  # 残予算がこれ未満なら回答生成をスキップ（縮退）
 
+# Recallの選択カード要約は最大10件の抜粋をCLIへ渡すため、通常の/find回答より
+# 長い猶予を持たせる。PWA側はこれより長く待つ必要がある。
+RECALL_ANSWER_TIMEOUT = 90.0
+RECALL_HTTP_TIMEOUT = 30.0
+
 TOP_FILES = 5           # 返信に載せる上位ファイル数
 SNIPPET_MARGIN = 10     # ヒット行の前後何行を読むか
 SNIPPET_MAX_CHARS = 2000  # 1ファイルあたり抜粋の上限（トークン節約）
@@ -27,6 +32,20 @@ SNIPPET_MAX_CHARS = 2000  # 1ファイルあたり抜粋の上限（トークン
 
 class ConfigError(RuntimeError):
     """設定不備（vault不在等）。CLIは exit 2 で返す。"""
+
+
+def positive_float_env(name: str, default: float) -> float:
+    """正の秒数を環境変数から読む。秘密値を含まない設定エラーだけを返す。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} は数値で指定してください") from exc
+    if value <= 0:
+        raise ConfigError(f"{name} は正の数で指定してください")
+    return value
 
 
 def resolve_vault(cli_value: str | None) -> Path:

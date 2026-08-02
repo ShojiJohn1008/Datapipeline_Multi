@@ -21,12 +21,40 @@ function doPost(e) {
 }
 
 function ask_(body) {
-  if (!body.query || !['search', 'summarize'].includes(body.type)) return {error: 'invalid request'};
+  if (!['search', 'summarize', 'capture'].includes(body.type)) return {error: 'invalid request'};
+  let payload;
+  if (body.type === 'capture') {
+    const card = body.card;
+    if (!card || typeof card !== 'object' || !card.id || !card.question || !card.answer || !card.intent) {
+      return {error: 'invalid capture'};
+    }
+    payload = {
+      type: 'capture',
+      card: {
+        id: String(card.id).slice(0, 200),
+        question: String(card.question).slice(0, 500),
+        answer: String(card.answer).slice(0, 12000),
+        intent: String(card.intent).slice(0, 1000),
+        category: String(card.category || '').slice(0, 100),
+        tags: Array.isArray(card.tags) ? card.tags.slice(0, 20).map(String) : [],
+        aliases: Array.isArray(card.aliases) ? card.aliases.slice(0, 20).map(String) : [],
+        source_name: String(card.source_name || '').slice(0, 300),
+        source_url: String(card.source_url || '').slice(0, 2048),
+        source_type: String(card.source_type || '').slice(0, 30),
+        captured_at: String(card.captured_at || '').slice(0, 40),
+      },
+    };
+  } else {
+    if (!body.query) return {error: 'invalid request'};
+    payload = {
+      type: body.type,
+      query: String(body.query),
+      ids: body.type === 'summarize' && Array.isArray(body.ids) ? body.ids : [],
+    };
+  }
   const id = Utilities.getUuid();
   sheet_(REQUESTS_SHEET, ['id', 'timestamp', 'status', 'payload'])
-    .appendRow([id, new Date().toISOString(), 'pending', JSON.stringify({
-      type: body.type, query: String(body.query), ids: Array.isArray(body.ids) ? body.ids : []
-    })]);
+    .appendRow([id, new Date().toISOString(), 'pending', JSON.stringify(payload)]);
   return {id: id};
 }
 
