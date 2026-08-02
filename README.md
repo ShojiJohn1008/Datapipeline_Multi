@@ -25,7 +25,7 @@ Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 
 ## Voice Memos 取り込み（実装済み・MacBook Airデプロイ待ち）
 
-iPhone Voice Memos の同期済み `.m4a` を、元ファイルに手を加えず共有Archive
+iPhone Voice Memos の同期済み `.m4a` / `.qta` を、元ファイルに手を加えず共有Archive
 へコピーし、同じ場所の決定論的なtranscript JSON sidecar、検索可能な共有Cardsカードの
 3層で保存する。PDFと同じ
 ローカルSQLite JobStoreでハッシュ重複、再試行、出力の完了状態を管理する。

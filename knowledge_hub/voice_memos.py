@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -53,6 +54,11 @@ AUDIO_MEDIA_TYPE = "audio/mp4"
 TRANSCRIPT_SCHEMA = "knowledge_hub.voice_memos.transcript"
 TRANSCRIPT_VERSION = 1
 MAX_TRANSCRIPT_SIDECAR_BYTES = 32 * 1024 * 1024
+SUPPORTED_AUDIO_SUFFIXES = {".m4a", ".qta"}
+_VOICE_MEMO_FILENAME = re.compile(
+    r"^(?P<recorded_at>\d{8} \d{6})-[0-9A-Fa-f]+(?P<suffix>\.m4a|\.qta)$",
+    re.IGNORECASE,
+)
 
 
 class SourcePermissionError(RuntimeError):
@@ -185,7 +191,7 @@ def _iter_recordings(source: Path) -> list[Path]:
     recordings: list[Path] = []
     for root, _, names in os.walk(source, onerror=onerror):
         for name in names:
-            if name.lower().endswith(".m4a"):
+            if Path(name).suffix.lower() in SUPPORTED_AUDIO_SUFFIXES:
                 recordings.append(Path(root) / name)
     if problems:
         error = problems[0]
@@ -212,6 +218,23 @@ def _transcript_sha256(transcript: str) -> str:
         return hashlib.sha256(transcript.encode("utf-8")).hexdigest()
     except UnicodeEncodeError as exc:
         raise TranscriptSidecarError("transcript_sidecar_invalid") from exc
+
+
+def _recorded_at_ns(relative: Path, fallback_mtime_ns: int) -> int:
+    """Return Voice Memos' recording time, falling back for unknown names.
+
+    iCloud materialization can assign a fresh filesystem mtime to an old
+    recording. Apple Voice Memos' internal filename keeps the original local
+    recording time, so use it for the baseline cutover when available.
+    """
+    match = _VOICE_MEMO_FILENAME.fullmatch(relative.name)
+    if match is None:
+        return fallback_mtime_ns
+    try:
+        recorded = datetime.strptime(match.group("recorded_at"), "%Y%m%d %H%M%S")
+    except ValueError:
+        return fallback_mtime_ns
+    return int(recorded.timestamp() * 1_000_000_000)
 
 
 def _transcriber_provenance(command: str) -> tuple[str, str, str]:
@@ -266,7 +289,10 @@ def audio_output_paths(job: JobRecord, paths: PipelinePaths) -> AudioOutputPaths
         raise RuntimeError("audio_job_invalid_created_at") from exc
     # Do not expose a Voice Memo's private recording name in output paths.
     filename = "voice-memo--{}".format(job.content_hash[:8])
-    archive = paths.archive / "{:04d}".format(created.year) / "{:02d}".format(created.month) / (filename + ".m4a")
+    suffix = Path(job.original_name).suffix.lower()
+    if suffix not in SUPPORTED_AUDIO_SUFFIXES:
+        raise UnsafePathError("unsupported audio source type")
+    archive = paths.archive / "{:04d}".format(created.year) / "{:02d}".format(created.month) / (filename + suffix)
     transcript = archive.with_suffix(".transcript.json")
     card = paths.cards / "{:04d}".format(created.year) / "{:02d}".format(created.month) / (filename + ".md")
     if not _is_within(archive.resolve(strict=False), paths.archive.resolve(strict=True)):
@@ -621,7 +647,12 @@ class VoiceMemosIngestor:
             item = items.get(item_key)
             if item is None:
                 cutover = state.get("baseline_cutover_mtime_ns")
-                status = "baselined" if isinstance(cutover, int) and mtime_ns <= cutover else "observing"
+                recorded_at_ns = _recorded_at_ns(relative, mtime_ns)
+                status = (
+                    "baselined"
+                    if isinstance(cutover, int) and recorded_at_ns <= cutover
+                    else "observing"
+                )
                 item = {"source_rel": relative.as_posix(), "size": size, "mtime_ns": mtime_ns,
                         "status": status, "stable_scans": 2 if status == "baselined" else 1}
                 items[item_key] = item
@@ -647,7 +678,8 @@ class VoiceMemosIngestor:
                 item["stable_scans"] = 1
                 report.pending += 1
                 continue
-            _, created = store.register(digest, source_file, original_name="voice-memo.m4a",
+            safe_name = "voice-memo" + source_file.suffix.lower()
+            _, created = store.register(digest, source_file, original_name=safe_name,
                                        size_bytes=size, media_type=AUDIO_MEDIA_TYPE)
             if created:
                 report.registered += 1

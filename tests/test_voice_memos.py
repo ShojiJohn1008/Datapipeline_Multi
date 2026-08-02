@@ -129,6 +129,27 @@ class VoiceMemosTests(unittest.TestCase):
         self.assertEqual((report.registered, report.cards), (0, 0))
         self.assertEqual(self._audio_jobs(), [])
 
+    def test_downloaded_historical_recording_uses_internal_recorded_time(self) -> None:
+        self._baseline()
+        self._recording("20200101 120000-DEADBEEF.m4a")
+        report = self._ingestor().scan_once()
+        self.assertEqual((report.registered, report.cards), (0, 0))
+        self.assertEqual(self._audio_jobs(), [])
+
+    def test_qta_recording_is_transcribed_and_archived_without_conversion(self) -> None:
+        self._baseline()
+        recording = self._recording("20990101 120000-DEADBEEF.qta")
+        self._ingestor().scan_once()
+        report = self._ingestor().scan_once()
+        job = self._audio_jobs()[0]
+        output = audio_output_paths(job, self.paths)
+        self.assertEqual((report.registered, report.cards), (1, 1))
+        self.assertEqual(job.content_hash, sha256_file(recording))
+        self.assertEqual(output.archive.suffix, ".qta")
+        self.assertEqual(output.archive.read_bytes(), recording.read_bytes())
+        self.assertEqual(_frontmatter(output.card)["source_path"],
+                         str(output.archive.relative_to(self.archive)))
+
     def test_new_file_two_scans_completes_shared_audio_job_and_card(self) -> None:
         self._baseline()
         recording = self._recording()

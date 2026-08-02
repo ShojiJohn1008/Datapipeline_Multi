@@ -9,7 +9,7 @@
 
    ```bash
    export KH_VOICE_MEMOS_PATH="$HOME/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings"
-   find "$KH_VOICE_MEMOS_PATH" -type f -name '*.m4a' | head
+   find "$KH_VOICE_MEMOS_PATH" -type f \( -name '*.m4a' -o -name '*.qta' \) | head
    ```
 
 3. 実行する Python 本体（venv の Python を含む）または launchd の起動元に、macOS の「フルディスクアクセス」を付与する。`Operation not permitted` は TCC の典型なので、端末アプリだけでなく **実際のインタプリタ／ランチャー**を許可してから再試行する。
@@ -60,7 +60,7 @@ mtimeを持つ録音が同期遅延で後から現れた場合も、追加の防
 
 新規の短いテスト録音を1件作り、少なくとも2回の走査（既定では30秒ごとの watch）後に次を確認する。
 
-1. Archive に `YYYY/MM/voice-memo--<hash8>.m4a` と同じbasenameの`.transcript.json` があり、sidecarの`transcript_sha256`がUTF-8全文と一致し、元の録音が残っている。
+1. Archive に `YYYY/MM/voice-memo--<hash8>.<source-ext>` と同じbasenameの`.transcript.json` があり、sidecarの`transcript_sha256`がUTF-8全文と一致し、元の録音が残っている。`.qta`入力は変換せず`.qta`のまま保存する。
 2. `Cards/YYYY/MM/` のカードにsummary、key points、tags、全文Transcriptとsidecar参照があり、共有状態DBのaudio jobがcompletedである。
 3. `python3 -m knowledge_hub.find "テスト録音の語" --vault "$KH_VAULT_PATH" --no-llm` でカードが見つかる。
 4. launchd 再起動後も同じ録音のコピー／カードが増えない。
