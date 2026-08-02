@@ -23,6 +23,26 @@ Vaultパスは `--vault` → `$KH_VAULT_PATH` → iCloud既定パスの順で解
 Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 [Mac実機組み込みチェックリスト](docs/MAC_DEPLOY_CHECKLIST.md) を参照。
 
+## Voice Memos 取り込み（実装済み・MacBook Airデプロイ待ち）
+
+iPhone Voice Memos の同期済み `.m4a` / `.qta` を、元ファイルに手を加えず共有Archive
+へコピーし、同じ場所の決定論的なtranscript JSON sidecar、検索可能な共有Cardsカードの
+3層で保存する。PDFと同じ
+ローカルSQLite JobStoreでハッシュ重複、再試行、出力の完了状態を管理する。
+初回は過去録音を誤投入しないため、必ず明示的な基準化が必要。
+
+```bash
+python3 -m knowledge_hub.voice_memos --baseline-existing --once
+# 新規録音を監視するには（KH_ARCHIVE_PATH, KH_VAULT_PATH,
+# KH_CARDS_PATH, KH_STATE_DB_PATH, KH_AUDIO_TRANSCRIBE_CMD を必要に応じ設定）
+# KH_AUDIO_SUMMARY_CMD を設定した場合だけ共有AgentProviderでsemantic summaryを試行。
+# 未設定時・要約失敗時も決定論的カードを作り、取り込みを止めない。
+python3 -m knowledge_hub.voice_memos --watch
+```
+
+MacBook Air での同期パス・TCC・実機検証を含む手順は
+[Voice Memos デプロイチェックリスト](docs/VOICE_MEMOS_DEPLOY_CHECKLIST.md) を参照。
+
 ## A-03: Recall PWA Vault横断検索
 
 `recall/` は検索一覧を即時表示し、選択したカードだけを後からまとめるPWAフロント、

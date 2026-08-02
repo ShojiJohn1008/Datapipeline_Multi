@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.knowledge-hub.voice-memos</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON3_ABSOLUTE_PATH__</string>
+    <string>-m</string>
+    <string>knowledge_hub.voice_memos</string>
+    <string>--watch</string>
+    <string>--interval</string><string>30</string>
+  </array>
+  <key>WorkingDirectory</key><string>__REPOSITORY_ABSOLUTE_PATH__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KH_VOICE_MEMOS_PATH</key><string>__VOICE_MEMOS_RECORDINGS_PATH__</string>
+    <key>KH_ARCHIVE_PATH</key><string>__ARCHIVE_ABSOLUTE_PATH__</string>
+    <key>KH_VAULT_PATH</key><string>__VAULT_ABSOLUTE_PATH__</string>
+    <key>KH_CARDS_PATH</key><string>__CARDS_ABSOLUTE_PATH__</string>
+    <key>KH_STATE_DB_PATH</key><string>__STATE_DB_ABSOLUTE_PATH__</string>
+    <key>KH_VOICE_MEMOS_STATE</key><string>__STATE_ABSOLUTE_PATH__</string>
+    <key>KH_AUDIO_TRANSCRIBE_CMD</key><string>__TRANSCRIBER_COMMAND__</string>
+    <!-- To opt in to semantic summary, add KH_AUDIO_SUMMARY_CMD with a local command. -->
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>__LOG_DIRECTORY__/voice-memos.out.log</string>
+  <key>StandardErrorPath</key><string>__LOG_DIRECTORY__/voice-memos.err.log</string>
+</dict>
+</plist>
