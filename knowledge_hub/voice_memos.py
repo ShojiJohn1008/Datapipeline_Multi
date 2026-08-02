@@ -7,6 +7,7 @@ retries, output paths, and content-hash deduplication belong to ``JobStore``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -33,6 +34,8 @@ from .ingest_pdf import (
     UnsafePathError,
     _ensure_parent,
     _is_within,
+    _markdown_inline,
+    _markdown_text,
     _verify_hash,
     _write_card_atomic,
 )
@@ -207,6 +210,14 @@ def _excerpt(transcript: str, limit: int = 160) -> str:
     return compact[:limit - 1] + "…" if len(compact) > limit else compact
 
 
+def _transcript_sha256(transcript: str) -> str:
+    """Hash the exact UTF-8 transcript persisted in the sidecar."""
+    try:
+        return hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError as exc:
+        raise TranscriptSidecarError("transcript_sidecar_invalid") from exc
+
+
 def _transcriber_provenance(command: str) -> tuple[str, str, str]:
     """Keep useful provenance without persisting a possibly sensitive command line."""
     argv = shlex.split(command)
@@ -309,12 +320,15 @@ def _read_transcript_sidecar(path: Path, expected_hash: str) -> TranscriptRecord
     if payload.get("content_hash") != expected_hash or payload.get("source_sha256") != expected_hash:
         raise OutputCollisionError("transcript_sidecar_hash_collision")
     transcript = payload.get("transcript")
+    transcript_sha256 = payload.get("transcript_sha256")
     generated_at = payload.get("generated_at")
     transcriber = payload.get("transcriber")
     model = payload.get("model")
     language = payload.get("language")
     if not all(isinstance(value, str) for value in
-               (transcript, generated_at, transcriber, model, language)):
+               (transcript, transcript_sha256, generated_at, transcriber, model, language)):
+        raise TranscriptSidecarError("transcript_sidecar_invalid")
+    if transcript_sha256 != _transcript_sha256(transcript):
         raise TranscriptSidecarError("transcript_sidecar_invalid")
     return TranscriptRecord(transcript, generated_at, transcriber, model, language)
 
@@ -335,14 +349,22 @@ def _write_transcript_sidecar(destination: Path, record: TranscriptRecord, expec
         "language": record.language,
         "generated_at": record.generated_at,
         "transcript": record.transcript,
+        "transcript_sha256": _transcript_sha256(record.transcript),
     }
-    handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".transcript-",
+    try:
+        serialized = (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise TranscriptSidecarError("transcript_sidecar_invalid") from exc
+    if len(serialized) > MAX_TRANSCRIPT_SIDECAR_BYTES:
+        raise TranscriptSidecarError("transcript_sidecar_invalid")
+    handle = tempfile.NamedTemporaryFile(mode="wb", prefix=".transcript-",
                                          suffix=".tmp", dir=destination.parent, delete=False)
     temporary = Path(handle.name)
     try:
         with handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
+            handle.write(serialized)
             handle.flush()
             os.fsync(handle.fileno())
         if destination.exists() or destination.is_symlink():
@@ -388,6 +410,7 @@ def _fallback_draft(transcript: str, captured_at: str) -> CardDraft:
 
 def render_audio_card(job: JobRecord, archive_relative: Path, transcript: str,
                       captured_at: str, draft: CardDraft) -> str:
+    transcript_relative = archive_relative.with_suffix(".transcript.json")
     frontmatter = {
         "id": "audio-" + job.content_hash,
         "content_hash": job.content_hash,
@@ -401,13 +424,36 @@ def render_audio_card(job: JobRecord, archive_relative: Path, transcript: str,
         "source_app": "voice_memos",
         "source_path": archive_relative.as_posix(),
         "source_sha256": job.content_hash,
+        "transcript_path": transcript_relative.as_posix(),
     }
     lines = ["---"]
     lines.extend("{}: {}".format(key, _yaml_value(value)) for key, value in frontmatter.items())
-    lines.extend(["---", "", "## Summary", "", draft.summary, "", "## Key points", ""])
-    lines.extend("- " + point for point in draft.key_points)
-    lines.extend(["", "## Original", "", "`{}`".format(archive_relative.as_posix()),
-                  "", "## Transcript", "", transcript, ""])
+    lines.extend([
+        "---",
+        "",
+        "# " + _markdown_inline(draft.title),
+        "",
+        "## Summary",
+        "",
+        _markdown_text(draft.summary.strip()),
+        "",
+        "## Key points",
+        "",
+    ])
+    lines.extend("- " + _markdown_inline(point) for point in draft.key_points)
+    lines.extend([
+        "",
+        "## Original",
+        "",
+        "Archive: `{}`".format(archive_relative.as_posix()),
+        "",
+        "Transcript sidecar: `{}`".format(transcript_relative.as_posix()),
+        "",
+        "## Transcript",
+        "",
+        _markdown_text(transcript),
+        "",
+    ])
     return "\n".join(lines)
 
 

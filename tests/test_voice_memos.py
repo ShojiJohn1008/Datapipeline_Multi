@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import subprocess
@@ -23,6 +24,7 @@ from knowledge_hub.voice_memos import (
     VoiceMemosIngestor,
     audio_output_paths,
     process_one_audio,
+    render_audio_card,
     main,
 )
 
@@ -157,6 +159,10 @@ class VoiceMemosTests(unittest.TestCase):
         self.assertEqual(payload["version"], 1)
         self.assertEqual(payload["content_hash"], sha256_file(recording))
         self.assertEqual(payload["source_sha256"], job.content_hash)
+        self.assertEqual(
+            payload["transcript_sha256"],
+            hashlib.sha256(payload["transcript"].encode("utf-8")).hexdigest(),
+        )
         self.assertEqual(payload["transcriber"], Path(sys.executable).name)
         self.assertIsInstance(payload["model"], str)
         self.assertIsInstance(payload["language"], str)
@@ -168,8 +174,64 @@ class VoiceMemosTests(unittest.TestCase):
         self.assertEqual(metadata["summary"], "意味のある要約です。")
         self.assertEqual(metadata["category"], "meeting")
         self.assertIn('tags: ["会議","音声"]', card_text)
+        self.assertEqual(metadata["transcript_path"], str(output.transcript.relative_to(self.archive)))
+        self.assertIn("Transcript sidecar: `{}`".format(metadata["transcript_path"]), card_text)
         self.assertIn("## Key points", card_text)
         self.assertIn("これは テスト 録音 の文字起こしです", card_text)
+
+    def test_transcript_body_tampering_is_detected_by_sidecar_checksum(self) -> None:
+        self._baseline()
+        provider = FakeSummaryProvider(fail=True)
+        ingestor = self._ingestor(summary_provider=provider)
+        self._recording()
+        ingestor.scan_once()
+        ingestor.scan_once()
+        job = self._audio_jobs()[0]
+        output = audio_output_paths(job, self.paths)
+        payload = json.loads(output.transcript.read_text(encoding="utf-8"))
+        payload["transcript"] = "改変された文字起こし"
+        output.transcript.write_text(json.dumps(payload), encoding="utf-8")
+        report = ingestor.scan_once()
+        self.assertEqual(report.errors, ["Voice Memos 処理保留: transcript_sidecar_invalid"])
+        self.assertEqual(JobStore(self.paths.state_db).get(job.content_hash).last_error,
+                         "transcript_sidecar_invalid")
+
+    def test_audio_card_escapes_agent_and_transcript_markdown(self) -> None:
+        recording = self._recording()
+        job, _ = JobStore(self.paths.state_db).register_file(recording, media_type=AUDIO_MEDIA_TYPE)
+        draft = CardDraft(
+            title="# untrusted <title>",
+            summary="summary\\n<script>alert(1)</script>",
+            category="audio",
+            tags=["audio"],
+            key_points=["[untrusted](https://example.invalid)"],
+        )
+        content = render_audio_card(
+            job,
+            Path("2026/08/voice-memo--12345678.m4a"),
+            "## untrusted transcript\\n<div>not HTML</div>",
+            "2026-08-03T00:00:00+00:00",
+            draft,
+        )
+        self.assertIn("# \\# untrusted \\<title\\>", content)
+        self.assertIn("\\<script\\>alert(1)\\</script\\>", content)
+        self.assertIn("- \\[untrusted\\](https://example.invalid)", content)
+        self.assertIn("\\#\\# untrusted transcript", content)
+        self.assertIn("\\<div\\>not HTML\\</div\\>", content)
+
+    def test_oversize_sidecar_is_rejected_before_publish(self) -> None:
+        self._baseline()
+        ingestor = self._ingestor()
+        self._recording()
+        ingestor.scan_once()
+        with patch("knowledge_hub.voice_memos.MAX_TRANSCRIPT_SIDECAR_BYTES", 1):
+            report = ingestor.scan_once()
+        job = self._audio_jobs()[0]
+        output = audio_output_paths(job, self.paths)
+        self.assertEqual(report.errors, ["Voice Memos 処理保留: transcript_sidecar_invalid"])
+        self.assertFalse(output.transcript.exists())
+        self.assertEqual(JobStore(self.paths.state_db).get(job.content_hash).last_error,
+                         "transcript_sidecar_invalid")
 
     def test_summary_retry_reuses_sidecar_without_rerunning_transcriber(self) -> None:
         self._baseline()

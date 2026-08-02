@@ -58,8 +58,8 @@ mtimeを持つ録音が同期遅延で後から現れた場合も、追加の防
 
 新規の短いテスト録音を1件作り、少なくとも2回の走査（既定では30秒ごとの watch）後に次を確認する。
 
-1. Archive に `YYYY/MM/voice-memo--<hash8>.m4a` と同じbasenameの`.transcript.json` があり、元の録音が残っている。
-2. `Cards/YYYY/MM/` のカードにsummary、key points、tags、全文Transcriptがあり、共有状態DBのaudio jobがcompletedである。
+1. Archive に `YYYY/MM/voice-memo--<hash8>.m4a` と同じbasenameの`.transcript.json` があり、sidecarの`transcript_sha256`がUTF-8全文と一致し、元の録音が残っている。
+2. `Cards/YYYY/MM/` のカードにsummary、key points、tags、全文Transcriptとsidecar参照があり、共有状態DBのaudio jobがcompletedである。
 3. `python3 -m knowledge_hub.find "テスト録音の語" --vault "$KH_VAULT_PATH" --no-llm` でカードが見つかる。
 4. launchd 再起動後も同じ録音のコピー／カードが増えない。
 
