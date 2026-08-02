@@ -88,8 +88,9 @@ def _markdown_inline(value: str) -> str:
     return compact
 
 
-def _markdown_text(value: str) -> str:
-    return "\n".join(_markdown_inline(line) if line.strip() else "" for line in value.splitlines())
+def _markdown_body(value: str) -> str:
+    """Preserve intentional Markdown in the card body with normalized newlines."""
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _existing_external_id(path: Path) -> str | None:
@@ -176,11 +177,11 @@ def capture_intent_card(card: object, vault: Path) -> dict[str, object]:
         "",
         "## Why I saved this",
         "",
-        _markdown_text(intent),
+        _markdown_body(intent),
         "",
         "## Answer",
         "",
-        _markdown_text(answer),
+        _markdown_body(answer),
         "",
         "## Source",
         "",

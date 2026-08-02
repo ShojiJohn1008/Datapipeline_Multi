@@ -52,8 +52,8 @@ class TestRecallSearch(unittest.TestCase):
             "card": {
                 "id": "supabase-card-1",
                 "question": "ARNIの開始時に確認することは？",
-                "answer": "血圧、腎機能、カリウムを確認する。",
-                "intent": "外来で開始前チェックを忘れないため",
+                "answer": "**血圧**、腎機能、カリウムを確認する。",
+                "intent": "- 外来で開始前チェックを忘れないため",
                 "category": "治療",
                 "tags": ["心不全", "ARNI"],
                 "aliases": ["サクビトリルバルサルタン"],
@@ -68,8 +68,10 @@ class TestRecallSearch(unittest.TestCase):
         path = self.vault / str(created["filepath"])
         content = path.read_text(encoding="utf-8")
         self.assertIn("## Why I saved this", content)
-        self.assertIn("外来で開始前チェックを忘れないため", content)
+        self.assertIn("- 外来で開始前チェックを忘れないため", content)
         self.assertIn("## Answer", content)
+        self.assertIn("**血圧**、腎機能、カリウムを確認する。", content)
+        self.assertNotIn(r"\*\*血圧\*\*", content)
         path.write_text(content + "\nuser edit\n", encoding="utf-8")
         repeated = handle_request(payload, self.vault)
         self.assertFalse(repeated["created"])
