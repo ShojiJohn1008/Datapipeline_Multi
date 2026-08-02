@@ -45,3 +45,15 @@ Inbox、処理の重複防止・再試行状態はローカル状態DBに分離�
 行わず、MacBook Airへのデプロイ段階で行う。状態DBの既定場所は同期競合を避けるためMacローカルの
 Application Support配下である。設定例とパスの責務は
 [ローカル入力パイプライン](docs/LOCAL_PIPELINE.md) を参照。
+
+最初の縦切りとして、安定したテキストPDFをInboxから1件発見し、SHA-256台帳登録、Poppler本文抽出、
+差し替え可能なAgent CLIによる構造化、Archive原本確保、Obsidian Markdownカード生成まで処理できる。
+
+```bash
+# 本番パスの設定と実行はMacBook Airへ切り替えた後に行う
+brew install poppler
+python3 -m knowledge_hub.ingest_pdf --once
+```
+
+設定、安全上限、Agent差し替え、OCR未対応時の挙動は
+[ローカル入力パイプライン](docs/LOCAL_PIPELINE.md#pdf一本の縦切りmvp)を参照。
