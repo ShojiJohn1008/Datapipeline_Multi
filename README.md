@@ -27,11 +27,16 @@ Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 
 `recall/` は検索一覧を即時表示し、選択したカードだけを後からまとめるPWAフロント、
 `gas/Code.gs` はGoogle Sheets中継、`knowledge_hub.worker` はMac側のポーリングワーカー。
+同じ中継の`capture`リクエストは、既存Supabase取り込みで生成済みの意図付きQ&Aを
+`Vault/Cards`へ1枚だけ保存する。Supabaseを削除・移行せず並行運用できる。
 
 ```bash
 export KH_RECALL_GAS_URL="<GASウェブアプリURL>"
 export KH_RECALL_TOKEN="<共有トークン>"
 export KH_VAULT_PATH="<Vaultパス>"
+# 任意: 遅い環境では要約CLI 90秒・GAS通信30秒の既定値を上書きできる
+# export KH_RECALL_ANSWER_TIMEOUT=120
+# export KH_RECALL_HTTP_TIMEOUT=60
 python3 -m knowledge_hub.worker
 ```
 
