@@ -67,10 +67,6 @@ class TranscriptSidecarError(RuntimeError):
     """A deterministic transcript sidecar is malformed or unsafe."""
 
 
-class AudioSummaryError(RuntimeError):
-    """A safe retryable failure at the optional semantic-summary boundary."""
-
-
 @dataclass(frozen=True)
 class AudioOutputPaths:
     archive: Path
@@ -221,6 +217,12 @@ def _transcript_sha256(transcript: str) -> str:
 def _transcriber_provenance(command: str) -> tuple[str, str, str]:
     """Keep useful provenance without persisting a possibly sensitive command line."""
     argv = shlex.split(command)
+    if any(Path(value).name == "transcribe_with_mlx_whisper.py" for value in argv):
+        return (
+            "mlx-whisper",
+            os.environ.get("KH_MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo"),
+            os.environ.get("KH_MLX_WHISPER_LANGUAGE", "ja"),
+        )
     return (
         Path(argv[0]).name,
         os.environ.get("KH_MLX_WHISPER_MODEL", "unspecified"),
@@ -409,7 +411,12 @@ def _fallback_draft(transcript: str, captured_at: str) -> CardDraft:
 
 
 def render_audio_card(job: JobRecord, archive_relative: Path, transcript: str,
-                      captured_at: str, draft: CardDraft) -> str:
+                      captured_at: str, draft: CardDraft,
+                      card_generation: str = "deterministic") -> str:
+    if card_generation not in {
+        "deterministic", "generative_ai", "deterministic_ai_fallback",
+    }:
+        raise ValueError("invalid card_generation")
     transcript_relative = archive_relative.with_suffix(".transcript.json")
     frontmatter = {
         "id": "audio-" + job.content_hash,
@@ -425,6 +432,7 @@ def render_audio_card(job: JobRecord, archive_relative: Path, transcript: str,
         "source_path": archive_relative.as_posix(),
         "source_sha256": job.content_hash,
         "transcript_path": transcript_relative.as_posix(),
+        "card_generation": card_generation,
     }
     lines = ["---"]
     lines.extend("{}: {}".format(key, _yaml_value(value)) for key, value in frontmatter.items())
@@ -462,8 +470,6 @@ def _audio_failure_code(error: Exception) -> str:
         return str(error)
     if isinstance(error, TranscriptSidecarError):
         return str(error)
-    if isinstance(error, AudioSummaryError):
-        return "audio_summary_failed"
     if isinstance(error, OutputCollisionError):
         return "output_collision"
     if isinstance(error, UnsafePathError):
@@ -516,6 +522,7 @@ def process_one_audio(paths: PipelinePaths, store: JobStore, source_root: Path, 
         )
         if summary_provider is None:
             draft = _fallback_draft(transcript_record.transcript, captured_at)
+            card_generation = "deterministic"
         else:
             try:
                 draft = summary_provider.create_card(transcript_record.transcript, {
@@ -524,10 +531,15 @@ def process_one_audio(paths: PipelinePaths, store: JobStore, source_root: Path, 
                     "source_app": "voice_memos",
                     "captured_at": captured_at,
                 })
-            except Exception as exc:
-                raise AudioSummaryError() from exc
+                card_generation = "generative_ai"
+            except Exception:
+                # Semantic structuring is optional. Its failure must not block
+                # the durable, searchable transcript produced by local ASR.
+                draft = _fallback_draft(transcript_record.transcript, captured_at)
+                card_generation = "deterministic_ai_fallback"
         content = render_audio_card(job, archived.relative_to(paths.archive),
-                                    transcript_record.transcript, captured_at, draft)
+                                    transcript_record.transcript, captured_at, draft,
+                                    card_generation)
         _write_card_atomic(output.card, content, job.content_hash, paths.cards)
         store.mark_completed(job.content_hash, archived, output.card)
         return AudioProcessResult(job.content_hash, "completed", archived, output.card)

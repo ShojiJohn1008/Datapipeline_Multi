@@ -35,7 +35,8 @@ iPhone Voice Memos の同期済み `.m4a` を、元ファイルに手を加え�
 python3 -m knowledge_hub.voice_memos --baseline-existing --once
 # 新規録音を監視するには（KH_ARCHIVE_PATH, KH_VAULT_PATH,
 # KH_CARDS_PATH, KH_STATE_DB_PATH, KH_AUDIO_TRANSCRIBE_CMD を必要に応じ設定）
-# KH_AUDIO_SUMMARY_CMD を設定した場合だけ共有AgentProviderでsemantic summaryを生成
+# KH_AUDIO_SUMMARY_CMD を設定した場合だけ共有AgentProviderでsemantic summaryを試行。
+# 未設定時・要約失敗時も決定論的カードを作り、取り込みを止めない。
 python3 -m knowledge_hub.voice_memos --watch
 ```
 

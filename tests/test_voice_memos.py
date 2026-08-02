@@ -22,6 +22,7 @@ from knowledge_hub.voice_memos import (
     AUDIO_MEDIA_TYPE,
     SourcePermissionError,
     VoiceMemosIngestor,
+    _transcriber_provenance,
     audio_output_paths,
     process_one_audio,
     render_audio_card,
@@ -93,6 +94,13 @@ class VoiceMemosTests(unittest.TestCase):
     def _audio_jobs(self) -> list:
         return [job for job in JobStore(self.paths.state_db).list() if job.media_type == AUDIO_MEDIA_TYPE]
 
+    def test_mlx_wrapper_provenance_matches_runtime_defaults(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                _transcriber_provenance("python scripts/transcribe_with_mlx_whisper.py"),
+                ("mlx-whisper", "mlx-community/whisper-large-v3-turbo", "ja"),
+            )
+
     def test_first_run_refuses_without_explicit_gate(self) -> None:
         self._recording()
         stderr = io.StringIO()
@@ -138,6 +146,7 @@ class VoiceMemosTests(unittest.TestCase):
         metadata = _frontmatter(cards[0])
         self.assertEqual(metadata["source_type"], "audio")
         self.assertEqual(metadata["source_app"], "voice_memos")
+        self.assertEqual(metadata["card_generation"], "deterministic")
         self.assertEqual(metadata["source_path"], str(audio[0].relative_to(self.archive)))
         self.assertIn("テスト 録音", cards[0].read_text(encoding="utf-8"))
         observation = json.loads(self.state.read_text(encoding="utf-8"))
@@ -173,6 +182,7 @@ class VoiceMemosTests(unittest.TestCase):
         self.assertEqual(metadata["title"], "構造化した音声メモ")
         self.assertEqual(metadata["summary"], "意味のある要約です。")
         self.assertEqual(metadata["category"], "meeting")
+        self.assertEqual(metadata["card_generation"], "generative_ai")
         self.assertIn('tags: ["会議","音声"]', card_text)
         self.assertEqual(metadata["transcript_path"], str(output.transcript.relative_to(self.archive)))
         self.assertIn("Transcript sidecar: `{}`".format(metadata["transcript_path"]), card_text)
@@ -181,11 +191,11 @@ class VoiceMemosTests(unittest.TestCase):
 
     def test_transcript_body_tampering_is_detected_by_sidecar_checksum(self) -> None:
         self._baseline()
-        provider = FakeSummaryProvider(fail=True)
-        ingestor = self._ingestor(summary_provider=provider)
+        ingestor = self._ingestor()
         self._recording()
         ingestor.scan_once()
-        ingestor.scan_once()
+        with patch("knowledge_hub.voice_memos._write_card_atomic", side_effect=OSError):
+            ingestor.scan_once()
         job = self._audio_jobs()[0]
         output = audio_output_paths(job, self.paths)
         payload = json.loads(output.transcript.read_text(encoding="utf-8"))
@@ -233,7 +243,7 @@ class VoiceMemosTests(unittest.TestCase):
         self.assertEqual(JobStore(self.paths.state_db).get(job.content_hash).last_error,
                          "transcript_sidecar_invalid")
 
-    def test_summary_retry_reuses_sidecar_without_rerunning_transcriber(self) -> None:
+    def test_summary_failure_falls_back_without_blocking_ingest(self) -> None:
         self._baseline()
         provider = FakeSummaryProvider(fail=True)
         ingestor = self._ingestor(summary_provider=provider)
@@ -242,24 +252,27 @@ class VoiceMemosTests(unittest.TestCase):
         report = ingestor.scan_once()
         job = self._audio_jobs()[0]
         output = audio_output_paths(job, self.paths)
-        self.assertEqual((report.errors, JobStore(self.paths.state_db).get(job.content_hash).status),
-                         (["Voice Memos 処理保留: audio_summary_failed"], "failed"))
+        self.assertEqual(report.errors, [])
+        self.assertEqual(JobStore(self.paths.state_db).get(job.content_hash).status, "completed")
         self.assertTrue(output.transcript.is_file())
-        provider.fail = False
+        self.assertTrue(output.card.is_file())
+        metadata = _frontmatter(output.card)
+        self.assertEqual(metadata["card_generation"], "deterministic_ai_fallback")
+        self.assertIn("これは テスト 録音", metadata["summary"])
         with patch("knowledge_hub.voice_memos._run_transcriber",
                    side_effect=AssertionError("sidecar should be reused")):
             retry = ingestor.scan_once()
-        self.assertEqual(retry.cards, 1)
-        self.assertEqual(provider.calls, 2)
+        self.assertEqual(retry.cards, 0)
+        self.assertEqual(provider.calls, 1)
         self.assertEqual(self._audio_jobs()[0].status, "completed")
 
     def test_invalid_or_mismatched_sidecar_fails_safely(self) -> None:
         self._baseline()
-        provider = FakeSummaryProvider(fail=True)
-        ingestor = self._ingestor(summary_provider=provider)
+        ingestor = self._ingestor()
         self._recording()
         ingestor.scan_once()
-        ingestor.scan_once()
+        with patch("knowledge_hub.voice_memos._write_card_atomic", side_effect=OSError):
+            ingestor.scan_once()
         job = self._audio_jobs()[0]
         output = audio_output_paths(job, self.paths)
         payload = json.loads(output.transcript.read_text(encoding="utf-8"))

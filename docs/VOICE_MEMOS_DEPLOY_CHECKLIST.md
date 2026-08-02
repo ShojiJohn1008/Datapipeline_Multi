@@ -20,7 +20,7 @@
    python3 -m venv .venv
    .venv/bin/pip install mlx-whisper
    export KH_AUDIO_TRANSCRIBE_CMD="$(pwd)/.venv/bin/python $(pwd)/scripts/transcribe_with_mlx_whisper.py"
-   # semantic summaryを使うときだけ設定する。未設定ならローカルfallbackでカードを作る。
+   # semantic summaryを使うときだけ設定する。未設定・失敗時はローカルfallbackでカードを作る。
    # export KH_AUDIO_SUMMARY_CMD="claude -p"
    export KH_ARCHIVE_PATH="/実在する/GoogleDrive/Archive"
    export KH_VAULT_PATH="/実在する/ObsidianVault"
@@ -37,7 +37,9 @@
    再投入するまでの時間は `--stale-after-seconds`（既定: 900秒）で指定できる。
    `KH_AUDIO_SUMMARY_CMD` は既存の共有AgentProvider JSON契約を使う明示opt-inである。
    未設定時は外部CLIを起動せず、短いtranscript excerpt・`voice_memos`/`audio` tags・要点を
-   決定論的にカード化する。要約失敗時もsidecarは保持され、再試行で文字起こしは再実行しない。
+   決定論的にカード化する。設定した生成AI要約が失敗した場合も同じfallbackで取り込みを完了する。
+   frontmatterの`card_generation`は`deterministic`、`generative_ai`、
+   `deterministic_ai_fallback`のいずれかになり、どの経路でカードを作ったか確認できる。
 
 ## 初回と検証
 

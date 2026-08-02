@@ -36,6 +36,7 @@
 - Voice Memos 取り込みローカル実装（2026-08-02）
   - 初回 `--baseline-existing` 安全ゲート、安定性2回確認、読み取り専用の原本コピー、失敗時の文字起こし再試行
   - PDFと共通のローカルJobStoreで、Archive原本と共有Cards検索カードを作るCLI、mlx-whisper任意ラッパー、launchdテンプレート
+  - 生成AI要約は明示opt-in。未設定・要約失敗時は決定論的カードへフォールバックし、`card_generation`で生成経路を監査可能
   - MacBook Air の実デバイス、iCloud同期、TCC／フルディスクアクセス、文字起こし品質は未検証
 
 ## 次の一手
