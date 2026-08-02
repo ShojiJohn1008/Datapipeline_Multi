@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -92,7 +93,12 @@ class TestRecallSearch(unittest.TestCase):
         self.assertIn("制御文字", rejected["error"])
 
     def test_summarize_uses_numbered_sources(self):
-        with mock.patch("knowledge_hub.recall.call_claude", return_value="記録では有用です。[1]") as llm:
+        # The default-value assertion must not inherit a developer's worker timeout.
+        clean_env = os.environ.copy()
+        clean_env.pop("KH_RECALL_ANSWER_TIMEOUT", None)
+        with mock.patch.dict("os.environ", clean_env, clear=True), mock.patch(
+            "knowledge_hub.recall.call_claude", return_value="記録では有用です。[1]"
+        ) as llm:
             result = summarize_cards("腫瘍熱", ["Cards/fever.md"], self.vault)
         self.assertEqual(result["answer"], "記録では有用です。[1]")
         self.assertIn("[1] Cards/fever.md", llm.call_args.args[0])
