@@ -43,6 +43,29 @@ export KH_ARCHIVE_PATH="$HOME/Library/CloudStorage/GoogleDrive-<account>/My Driv
 置かない。複数端末の同期中にSQLiteファイルが競合・破損するリスクを避けるため、Macローカルの
 Application Support配下を使う。別の場所が必要な場合だけ`KH_STATE_DB_PATH`で明示指定する。
 
+## ローカルジョブ台帳
+
+`knowledge_hub.job_store.JobStore` はInboxを走査するworkerのためのSQLite台帳である。DB親の作成は
+行わないので、書き込み前に必ず`ensure_pipeline_directories(paths)`を呼ぶ。内容のSHA-256を主キーに
+するため、同じファイルが別名で再びInboxへ届いても二重処理しない。
+
+```text
+pending --claim--> processing --success--> completed
+                         |\
+                         | \--failure--> failed --claim (attempts < 上限)--> processing
+                         |
+                         \--stale worker recovery--> pending
+```
+
+`completed` は再claimされない。claimはSQLiteの`BEGIN IMMEDIATE`で直列化されるため、複数workerが
+同じジョブを処理するのを防ぐ。台帳にはハッシュ、パス、ファイル名、サイズ、MIME種別、状態、試行回数、
+短いエラー、Archive/Cardの出力パス、時刻だけを保存する。**原本バイト列、PDF抽出本文、Markdown本文、
+LLMトークンや認証情報は保存しない。**
+
+通常の`pending`は`failed`の再試行より先にclaimするため、一時失敗が新しい入力を塞がない。`mark_failed()`へ
+渡すエラーにはトークン、Bearer認証値、APIキー、秘密情報、原文を含めてはならない。典型的な credential
+表現は台帳側でも`[REDACTED]`に置換するが、これは呼び出し側の秘匿契約を補助するための防御である。
+
 ## 開発時の利用
 
 ```python
