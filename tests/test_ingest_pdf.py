@@ -102,8 +102,19 @@ class TestPdfIngest(unittest.TestCase):
         self.assertIn("医学-循環器", output1.archive.name)
         self.assertNotIn(":", output1.archive.name)
         self.assertTrue(str(output1.archive).startswith(str(self.paths.archive)))
-        self.assertEqual(safe_stem("...pdf"), "pdf")
-        self.assertNotIn("..", safe_stem("../../escape.pdf"))
+
+    def test_safe_stem_is_independent_of_pathlib_suffix_changes(self) -> None:
+        cases = {
+            "...pdf": "pdf",
+            ".pdf": "pdf",
+            "foo.pdf": "foo",
+            "archive.tar.pdf": "archive.tar",
+            "医学 資料.pdf": "医学 資料",
+            "../../escape.pdf": "escape",
+        }
+        for filename, expected in cases.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(safe_stem(filename), expected)
 
     def test_complete_vertical_slice_moves_original_and_writes_small_card(self) -> None:
         source, job = self.register_pdf()

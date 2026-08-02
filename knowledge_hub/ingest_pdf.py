@@ -81,7 +81,15 @@ def _is_within(path: Path, root: Path) -> bool:
 
 def safe_stem(filename: str, max_length: int = 80) -> str:
     """Keep readable Unicode while removing traversal and filesystem hazards."""
-    stem = unicodedata.normalize("NFKC", Path(filename).stem)
+    name = Path(filename).name
+    suffix_start = name.rfind(".")
+    # pathlib before Python 3.14 treated the tail of names made only of
+    # leading dots (for example ``...pdf``) as a suffix.  Derive the stem
+    # explicitly so those names have the same safe result on every supported
+    # Python version while ordinary and compound extensions are still removed.
+    if suffix_start > 0 and name[:suffix_start].strip("."):
+        name = name[:suffix_start]
+    stem = unicodedata.normalize("NFKC", name)
     characters: list[str] = []
     for character in stem:
         if character.isalnum() or character in " -_().":
