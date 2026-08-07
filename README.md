@@ -4,6 +4,7 @@
 複数のレンズ（検索・タイムライン等）で引き出す個人知識基盤のデータパイプライン置き場。
 
 - 現在地・次の一手: [STATUS.md](STATUS.md)
+- バックログ（番号・状態・依存の一元管理）: [BACKLOG.md](BACKLOG.md)
 - 設計: [docs/DESIGN.md](docs/DESIGN.md)
 - GPT-5.6作業指示: [docs/HANDOFF_GPT56.md](docs/HANDOFF_GPT56.md)
 
