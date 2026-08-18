@@ -58,7 +58,8 @@ python3 -m knowledge_hub.voice_lane [--source PATH] [--archive PATH] [--vault PA
   `KH_CARDS_PATH`（カード保存先。既定 `<Vault>/Cards`）・
   `KH_VAULT_PATH`・`KH_ASR_CMD`・`KH_ASR_TIMEOUT`・`KH_CLAUDE_CMD`・`KH_VOICE_STATE`
 - 取り込み元はボイスメモコンテナに限らず任意のフォルダを指定できる（直下のみ・非再帰）。
-  Shoji実機ではVault内 `1_Raw/Transcripts/audio` を監視する運用
+  Shoji実機は既定のボイスメモコンテナのままでよい。Vault内 `1_Raw/Transcripts/audio` は
+  既存ワークフローの「文字起こし済み音声」の置き場であり、本レーンの監視対象ではない
 - **同期中を掴まない**: 2パス連続でサイズ不変のファイルだけ処理（初見は「⏳ 同期待ち」）
 - ASR失敗: 台帳に載せず次パスでリトライ（「⚠️ 失敗」）。タイムアウトは
   `KH_ASR_TIMEOUT` 指定が無ければサイズから自動算出（1MBあたり90秒・最低5分）
