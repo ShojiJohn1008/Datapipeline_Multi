@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -192,21 +193,32 @@ def save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def run_baseline(source: Path, state_path: Path) -> list[str]:
+def run_baseline(source: Path, state_path: Path, keep_days: float | None = None) -> list[str]:
     """既存の録音を処理せず「処理済み」として台帳に記録する（初回導入用の基準線）。
 
+    keep_days を指定すると、録音日時が直近その日数以内のものは基準線に含めず
+    処理対象に残す（例: 7 → 過去1週間分は通常どおりカード化される）。
     以後のパスは基準線より後の新着だけを処理する。取り消したい場合は台帳を
     削除すれば全件が再対象になる（カード済みのものは実在チェックが再処理を防ぐ）。
     """
     state = load_state(state_path)
-    count = 0
+    cutoff = time.time() - keep_days * 86400 if keep_days else None
+    count = kept = 0
     for rec in discover_recordings(source):
+        if cutoff is not None and rec.recorded_at >= cutoff:
+            kept += 1
+            continue
         key = f"{rec.source.name}:{rec.source.stat().st_size}"
         if key not in state["processed"]:
             state["processed"][key] = {"archive": "(baseline)", "card": "(baseline)"}
             count += 1
     save_state(state_path, state)
-    return [f"基準線設定: 既存{count}件を処理済み扱いにした（以後の新着のみ処理）"]
+    line = f"基準線設定: 既存{count}件を処理済み扱いにした"
+    if cutoff is not None:
+        line += f"（直近{keep_days:g}日の{kept}件は処理対象に残した）"
+    else:
+        line += "（以後の新着のみ処理）"
+    return [line]
 
 
 def run_pass(source: Path, archive_root: Path, cards_dir: Path, state_path: Path,
@@ -260,13 +272,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-llm", action="store_true", help="LLMを使わない（縮退タイトルで保存）")
     parser.add_argument("--baseline", action="store_true",
                         help="既存の録音を処理済み扱いにして終了（初回導入時: 以後の新着のみ処理）")
+    parser.add_argument("--keep-days", type=float, metavar="N",
+                        help="--baseline時、直近N日の録音は基準線に含めず処理対象に残す")
     args = parser.parse_args(argv)
 
     try:
         source = config.resolve_voicememo(args.source)
         if args.baseline:
             state_path = Path(args.state).expanduser() if args.state else config.default_voice_state()
-            print("\n".join(run_baseline(source, state_path)))
+            print("\n".join(run_baseline(source, state_path, args.keep_days)))
             return 0
         archive = config.resolve_archive(args.archive)
         cards = config.resolve_cards(args.cards, args.vault)

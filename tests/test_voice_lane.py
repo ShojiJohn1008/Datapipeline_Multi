@@ -211,6 +211,21 @@ class TestPipeline(VoiceLaneCase):
         self.assertEqual(len(names), 1)  # 新着だけがカード化
         self.assertEqual(self.asr_runs(), 1)
 
+    def test_baseline_keep_days_leaves_recent_for_processing(self):
+        """--baseline --keep-days N: 古い録音だけ基準線に入り、直近N日分はカード化される。"""
+        self.add_recording("古い録音.m4a")  # TS=2026-08-01（1週間より前）
+        recent = self.source / "最近の録音.m4a"
+        recent.write_bytes(b"fake-audio-bytes")
+        t = time.time() - 86400  # 1日前
+        os.utime(recent, (t, t))
+        lines = run_baseline(self.source, self.state, keep_days=7)
+        self.assertIn("既存1件", lines[0])
+        self.assertIn("1件は処理対象に残した", lines[0])
+        self.run_lane()
+        self.run_lane()
+        self.assertEqual(len(list((self.vault / "Cards").glob("*.md"))), 1)
+        self.assertEqual(self.asr_runs(), 1)  # 文字起こしされたのは直近の1件だけ
+
     def test_custom_cards_dir(self):
         """カード保存先はVault/Cards固定でなく任意フォルダを指定できる（Vault構成変更対応）。"""
         cards = self.vault / "2_Cards" / "voice"
