@@ -65,7 +65,7 @@ class VoiceLaneCase(unittest.TestCase):
         return path
 
     def run_lane(self) -> list[str]:
-        return run_pass(self.source, self.archive, self.vault, self.state)
+        return run_pass(self.source, self.archive, self.vault / "Cards", self.state)
 
     def asr_runs(self) -> int:
         if not self.asr_count.exists():
@@ -197,6 +197,14 @@ class TestPipeline(VoiceLaneCase):
         self.run_lane()
         names = sorted(p.name for p in (self.vault / "Cards").glob("*.md"))
         self.assertEqual(names, ["2026-08-01_腫瘍熱メモ-2.md", "2026-08-01_腫瘍熱メモ.md"])
+
+    def test_custom_cards_dir(self):
+        """カード保存先はVault/Cards固定でなく任意フォルダを指定できる（Vault構成変更対応）。"""
+        cards = self.vault / "2_Cards" / "voice"
+        self.add_recording()
+        run_pass(self.source, self.archive, cards, self.state)
+        run_pass(self.source, self.archive, cards, self.state)
+        self.assertTrue((cards / "2026-08-01_腫瘍熱メモ.md").is_file())
 
     def test_sanitize_title(self):
         self.assertEqual(sanitize_title("鑑別/腫瘍熱:メモ", "fb"), "鑑別 腫瘍熱 メモ")

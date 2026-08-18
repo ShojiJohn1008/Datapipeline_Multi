@@ -2,7 +2,7 @@
 
 使い方（launchd/cronからの結合点はこの1コマンドのみ）:
     python3 -m knowledge_hub.voice_lane [--source PATH] [--archive PATH] [--vault PATH]
-                                        [--state PATH] [--no-llm]
+                                        [--cards PATH] [--state PATH] [--no-llm]
 1回起動=1パス。ボイスメモ新着を Archive へコピー→ローカル文字起こし→索引カード保存。
 exit 0: 処理結果をstdoutへ1行ずつ / exit 2: 設定エラー（stderr参照）
 
@@ -123,9 +123,8 @@ def generate_card(transcript: str, fallback_title: str, use_llm: bool) -> Card:
     return Card(fallback_title, None, [])
 
 
-def card_exists_for_source(vault: Path, archive_rel: str) -> bool:
-    """Cards/に同じ原本を指すカードが既にあるか（台帳消失時の二重処理保険）。"""
-    cards_dir = vault / "Cards"
+def card_exists_for_source(cards_dir: Path, archive_rel: str) -> bool:
+    """カード置き場に同じ原本を指すカードが既にあるか（台帳消失時の二重処理保険）。"""
     if not cards_dir.is_dir():
         return False
     for path in cards_dir.glob("*.md"):
@@ -143,11 +142,10 @@ def card_exists_for_source(vault: Path, archive_rel: str) -> bool:
     return False
 
 
-def save_card(vault: Path, card: Card, transcript: str, rec: Recording, archive_rel: str) -> Path:
-    """索引カードを Cards/YYYY-MM-DD_<title>.md へ保存（衝突時は連番）。"""
+def save_card(cards_dir: Path, card: Card, transcript: str, rec: Recording, archive_rel: str) -> Path:
+    """索引カードを <カード置き場>/YYYY-MM-DD_<title>.md へ保存（衝突時は連番）。"""
     dt = datetime.fromtimestamp(rec.recorded_at)
-    cards_dir = vault / "Cards"
-    cards_dir.mkdir(exist_ok=True)
+    cards_dir.mkdir(parents=True, exist_ok=True)
     lines = [
         "---",
         "type: voice",
@@ -194,7 +192,7 @@ def save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def run_pass(source: Path, archive_root: Path, vault: Path, state_path: Path,
+def run_pass(source: Path, archive_root: Path, cards_dir: Path, state_path: Path,
              use_llm: bool = True) -> list[str]:
     """1パス実行。処理結果を人間可読の行リストで返す（CLIはこれをそのまま出力）。"""
     state = load_state(state_path)
@@ -214,7 +212,7 @@ def run_pass(source: Path, archive_root: Path, vault: Path, state_path: Path,
         try:
             archived = ingest(rec, archive_root)
             archive_rel = f"Archive/{archived.relative_to(archive_root)}"
-            if card_exists_for_source(vault, archive_rel):
+            if card_exists_for_source(cards_dir, archive_rel):
                 # 台帳消失後などの保険。文字起こし自体を実行しない
                 state["processed"][key] = {"archive": str(archived), "card": "(既存)"}
                 lines.append(f"↩️ 既存カードあり・スキップ: {rec.source.name}")
@@ -226,7 +224,7 @@ def run_pass(source: Path, archive_root: Path, vault: Path, state_path: Path,
             continue
         dt = datetime.fromtimestamp(rec.recorded_at)
         card = generate_card(transcript, f"音声メモ{dt.strftime('%H%M')}", use_llm)
-        card_path = save_card(vault, card, transcript, rec, archive_rel)
+        card_path = save_card(cards_dir, card, transcript, rec, archive_rel)
         state["processed"][key] = {"archive": str(archived), "card": card_path.name}
         lines.append(f"✅ {card_path.name} ← {rec.source.name}")
     state["seen"] = seen
@@ -240,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", help="ボイスメモ録音フォルダ（既定: $KH_VOICEMEMO_PATH → Apple既定パス）")
     parser.add_argument("--archive", help="原本ストアArchiveのローカル実パス（既定: $KH_ARCHIVE_PATH）")
     parser.add_argument("--vault", help="Vaultパス（既定: $KH_VAULT_PATH → iCloud既定パス）")
+    parser.add_argument("--cards", help="カード保存先（既定: $KH_CARDS_PATH → <Vault>/Cards）")
     parser.add_argument("--state", help="処理台帳（既定: $KH_VOICE_STATE → ~/.kh_voice_state.json）")
     parser.add_argument("--no-llm", action="store_true", help="LLMを使わない（縮退タイトルで保存）")
     args = parser.parse_args(argv)
@@ -247,13 +246,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source = config.resolve_voicememo(args.source)
         archive = config.resolve_archive(args.archive)
-        vault = config.resolve_vault(args.vault)
+        cards = config.resolve_cards(args.cards, args.vault)
     except config.ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
 
     state_path = Path(args.state).expanduser() if args.state else config.default_voice_state()
-    lines = run_pass(source, archive, vault, state_path, use_llm=not args.no_llm)
+    lines = run_pass(source, archive, cards, state_path, use_llm=not args.no_llm)
     print("\n".join(lines) if lines else "新着なし")
     return 0
 

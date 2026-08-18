@@ -28,7 +28,8 @@ Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 
 ```bash
 # 1パス実行（launchd/cronから数分毎に起動。iPhone側の操作はゼロ）
-python3 -m knowledge_hub.voice_lane [--source PATH] [--archive PATH] [--vault PATH] [--no-llm]
+python3 -m knowledge_hub.voice_lane [--source PATH] [--archive PATH] [--vault PATH] \
+                                    [--cards PATH] [--no-llm]
 ```
 
 iCloud同期でMacに届いたボイスメモを検知し、原本をDrive `/Archive/YYYY-MM/` に集約、

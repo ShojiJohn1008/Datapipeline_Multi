@@ -83,6 +83,18 @@ def resolve_archive(cli_value: str | None) -> Path:
     return archive
 
 
+def resolve_cards(cards_cli: str | None, vault_cli: str | None) -> Path:
+    """カード保存先。優先順: --cards > $KH_CARDS_PATH > <Vault>/Cards。
+
+    保存先を直接指定した場合はVault解決を要求しない（Vault構成変更に追従できるように）。
+    """
+    if cards_cli:
+        return Path(cards_cli).expanduser()
+    if os.environ.get("KH_CARDS_PATH"):
+        return Path(os.environ["KH_CARDS_PATH"]).expanduser()
+    return resolve_vault(vault_cli) / "Cards"
+
+
 def default_voice_state() -> Path:
     if os.environ.get("KH_VOICE_STATE"):
         return Path(os.environ["KH_VOICE_STATE"]).expanduser()
