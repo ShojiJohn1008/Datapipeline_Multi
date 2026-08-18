@@ -92,12 +92,88 @@ tags: ["tag1", "tag2"]
 
 ## Mac実機セットアップ（関門2の手順）
 
-1. A-02完了を確認（`$KH_ARCHIVE_PATH` と Vault `Cards/` が実在）
-2. whisper.cppを導入しモデルを取得、`KH_ASR_CMD="whisper-cli -m <モデル> -nt -np -f"`
-   の形で動作確認（`KH_ASR_CMD <適当なm4a>` がテキストを出すこと）
-3. 手動で1パス実行して1件通す: `python3 -m knowledge_hub.voice_lane`
-4. launchdに5分間隔で登録（StartInterval=300）。実行ログは時刻とstdoutのみ残す
-5. `STATUS.md` の関門2に確認日・所要時間を記録
+前提: A-02完了（`$KH_ARCHIVE_PATH` と Vault `Cards/` が実在）。
+Macで新しく作るファイルは3つだけ: ①ASRラッパー ②環境変数 ③launchd plist。
+
+### ① ASRラッパー `~/bin/kh-asr.sh`
+
+導入済みWhisperの形態を確認: `which whisper whisper-cli mlx_whisper`
+
+**A. openai-whisper（pipの `whisper`）の場合**（モデル名 `turbo` = large-v3-turbo）:
+
+```sh
+#!/bin/sh
+# KH_ASR_CMD契約: 引数=音声パス / stdout=テキストのみ / 失敗=exit非0
+set -e
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+whisper --model turbo --language ja --output_format txt \
+        --output_dir "$tmp" "$1" >/dev/null 2>&1
+cat "$tmp"/*.txt
+```
+
+**B. whisper.cpp（`whisper-cli`）の場合**（m4a直読み不可の版があるためwav変換を挟む）:
+
+```sh
+#!/bin/sh
+set -e
+tmp=$(mktemp).wav
+trap 'rm -f "$tmp"' EXIT
+ffmpeg -y -i "$1" -ar 16000 -ac 1 -c:a pcm_s16le "$tmp" >/dev/null 2>&1
+whisper-cli -m "$HOME/models/ggml-large-v3-turbo.bin" -l ja -nt -np -f "$tmp"
+```
+
+作成後: `chmod +x ~/bin/kh-asr.sh` → `~/bin/kh-asr.sh <適当なm4a>` がテキストを出せばOK。
+
+### ② 環境変数（`~/.zshrc` に追記。値はコミットしない）
+
+```sh
+export KH_ARCHIVE_PATH="$HOME/Library/CloudStorage/GoogleDrive-<アカウント>/マイドライブ/Archive"
+export KH_ASR_CMD="$HOME/bin/kh-asr.sh"
+# Vaultが既定のiCloudパス(JohnSecondBrain)ならKH_VAULT_PATHは不要
+```
+
+### ③ 手動で関門2を通す
+
+ボイスメモコンテナを読むため、システム設定→プライバシーとセキュリティ→
+**フルディスクアクセス**にターミナルを追加してから:
+
+```sh
+cd Datapipeline_Multi
+python3 -m knowledge_hub.voice_lane   # 1回目: ⏳ 同期待ち
+python3 -m knowledge_hub.voice_lane   # 2回目: ✅ カード生成
+```
+
+Obsidianで `Cards/` にカードが見えたら関門2通過。`STATUS.md` に確認日・所要時間を記録。
+
+### ④ launchd常駐化 `~/Library/LaunchAgents/com.kh.voice-lane.plist`
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.kh.voice-lane</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string><string>-m</string><string>knowledge_hub.voice_lane</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/＜ユーザー名＞/Datapipeline_Multi</string>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KH_ARCHIVE_PATH</key><string>＜②と同じ実パス＞</string>
+    <key>KH_ASR_CMD</key><string>/Users/＜ユーザー名＞/bin/kh-asr.sh</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/＜ユーザー名＞/Library/Logs/kh-voice-lane.log</string>
+  <key>StandardErrorPath</key><string>/Users/＜ユーザー名＞/Library/Logs/kh-voice-lane.err</string>
+</dict>
+</plist>
+```
+
+登録: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kh.voice-lane.plist`
+（launchd実行でボイスメモが読めない場合は python3 にもフルディスクアクセスを付与）
 
 ## 注意
 
