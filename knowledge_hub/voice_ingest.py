@@ -17,7 +17,8 @@ _CORE_DATA_EPOCH = 978307200.0
 _DB_NAME = "CloudRecordings.db"
 _TITLE_COLUMNS = ("ZCUSTOMLABEL", "ZENCRYPTEDTITLE")  # OS版によりどちらか
 
-AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac"}
+# .qta は新しめのボイスメモが使う形式（中身はMPEG-4系。ffmpegは内容で判別するので読める）
+AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac", ".qta"}
 
 
 @dataclass

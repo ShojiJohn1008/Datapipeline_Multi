@@ -86,10 +86,10 @@ class TestDiscovery(VoiceLaneCase):
 
     def test_folder_scan_when_no_db(self):
         self.add_recording("朝の散歩.m4a")
+        self.add_recording("新形式.qta")
         recs = discover_recordings(self.source)
-        self.assertEqual(len(recs), 1)
-        self.assertEqual(recs[0].title, "朝の散歩")
-        self.assertAlmostEqual(recs[0].recorded_at, TS, delta=2)
+        self.assertEqual([r.title for r in recs], ["新形式", "朝の散歩"])
+        self.assertAlmostEqual(recs[-1].recorded_at, TS, delta=2)
 
     def test_db_gives_title_and_date(self):
         self.add_recording("20260801 081200.m4a")
