@@ -12,7 +12,7 @@
 | A-02 | データ層の物理基盤: Drive `/Archive/` ・ミラーリング・Vault `Cards/` | 指示書あり・Mac実機作業が未実施 | なし（**最優先。ほぼ全項目の前提**） | [a02-instruction.md](a02-instruction.md) |
 | A-03 | Recall PWAにVault横断検索（Pull窓） | 指示書あり・実装未着手 | 検索コアはA-01流用。実機検証はA-02 | [a03-instruction.md](a03-instruction.md) |
 | A-04 | （詳細未定義。`Cards/test.md` で動作確認できる何か、とだけ判明） | 未定義 | 不明 | — |
-| B-01 | 音声レーン: Drive投入→ローカル文字起こし→索引カード自動生成 | 指示書あり・実装未着手 | A-02（監視パスと `Cards/`）。稼働開始前にC-05 | [b01-instruction.md](b01-instruction.md) |
+| B-01 | 音声レーン: ボイスメモ自動取り込み→ローカル文字起こし→索引カード自動生成（iPhone操作ゼロ） | コア実装済み・関門1 green。Mac実機の関門2〜4待ち | A-02（Archiveパスと `Cards/`）。稼働開始前にC-05 | [b01-instruction.md](b01-instruction.md) |
 | C-05 | バックアップ | 未着手 | なし（**B-01稼働前に必須**。実データを失う前に） | — |
 
 ## 推奨順序

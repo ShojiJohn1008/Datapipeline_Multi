@@ -23,3 +23,15 @@ LLM経路は `claude -p`（`KH_CLAUDE_CMD` で差し替え可）。
 Vaultパスは `--vault` → `$KH_VAULT_PATH` → iCloud既定パスの順で解決。
 Mac実機への組み込み、Driveミラーリング、四関門2〜4は
 [Mac実機組み込みチェックリスト](docs/MAC_DEPLOY_CHECKLIST.md) を参照。
+
+## B-01: ボイスメモ→索引カード自動生成（音声レーン）
+
+```bash
+# 1パス実行（launchd/cronから数分毎に起動。iPhone側の操作はゼロ）
+python3 -m knowledge_hub.voice_lane [--source PATH] [--archive PATH] [--vault PATH] [--no-llm]
+```
+
+iCloud同期でMacに届いたボイスメモを検知し、原本をDrive `/Archive/YYYY-MM/` に集約、
+**ローカルで**文字起こし（`KH_ASR_CMD`、既定 whisper.cpp。医療用語モデルへ差し替え可）して
+タイトル・要約・タグ付きカードを Vault `Cards/` に保存する。同じ録音は二度処理しない
+（処理台帳＋カード実在チェック）。詳細は [b01-instruction.md](b01-instruction.md)。
