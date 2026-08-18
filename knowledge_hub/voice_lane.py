@@ -192,6 +192,23 @@ def save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def run_baseline(source: Path, state_path: Path) -> list[str]:
+    """既存の録音を処理せず「処理済み」として台帳に記録する（初回導入用の基準線）。
+
+    以後のパスは基準線より後の新着だけを処理する。取り消したい場合は台帳を
+    削除すれば全件が再対象になる（カード済みのものは実在チェックが再処理を防ぐ）。
+    """
+    state = load_state(state_path)
+    count = 0
+    for rec in discover_recordings(source):
+        key = f"{rec.source.name}:{rec.source.stat().st_size}"
+        if key not in state["processed"]:
+            state["processed"][key] = {"archive": "(baseline)", "card": "(baseline)"}
+            count += 1
+    save_state(state_path, state)
+    return [f"基準線設定: 既存{count}件を処理済み扱いにした（以後の新着のみ処理）"]
+
+
 def run_pass(source: Path, archive_root: Path, cards_dir: Path, state_path: Path,
              use_llm: bool = True) -> list[str]:
     """1パス実行。処理結果を人間可読の行リストで返す（CLIはこれをそのまま出力）。"""
@@ -241,10 +258,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cards", help="カード保存先（既定: $KH_CARDS_PATH → <Vault>/Cards）")
     parser.add_argument("--state", help="処理台帳（既定: $KH_VOICE_STATE → ~/.kh_voice_state.json）")
     parser.add_argument("--no-llm", action="store_true", help="LLMを使わない（縮退タイトルで保存）")
+    parser.add_argument("--baseline", action="store_true",
+                        help="既存の録音を処理済み扱いにして終了（初回導入時: 以後の新着のみ処理）")
     args = parser.parse_args(argv)
 
     try:
         source = config.resolve_voicememo(args.source)
+        if args.baseline:
+            state_path = Path(args.state).expanduser() if args.state else config.default_voice_state()
+            print("\n".join(run_baseline(source, state_path)))
+            return 0
         archive = config.resolve_archive(args.archive)
         cards = config.resolve_cards(args.cards, args.vault)
     except config.ConfigError as e:

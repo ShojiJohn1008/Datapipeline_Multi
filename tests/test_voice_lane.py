@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from knowledge_hub.voice_ingest import discover_recordings
-from knowledge_hub.voice_lane import run_pass, sanitize_title
+from knowledge_hub.voice_lane import run_baseline, run_pass, sanitize_title
 
 ROOT = Path(__file__).resolve().parents[1]
 _CORE_DATA_EPOCH = 978307200.0
@@ -197,6 +197,19 @@ class TestPipeline(VoiceLaneCase):
         self.run_lane()
         names = sorted(p.name for p in (self.vault / "Cards").glob("*.md"))
         self.assertEqual(names, ["2026-08-01_腫瘍熱メモ-2.md", "2026-08-01_腫瘍熱メモ.md"])
+
+    def test_baseline_skips_existing_but_processes_new(self):
+        """--baseline: 既存録音は処理済み扱い、以後の新着だけ処理される。"""
+        self.add_recording("過去の録音.m4a")
+        lines = run_baseline(self.source, self.state)
+        self.assertIn("既存1件", lines[0])
+        self.assertEqual(self.run_lane(), [])  # 既存分は同期待ちにもならない
+        self.add_recording("新しい録音.m4a")
+        self.run_lane()
+        self.run_lane()
+        names = [p.name for p in (self.vault / "Cards").glob("*.md")]
+        self.assertEqual(len(names), 1)  # 新着だけがカード化
+        self.assertEqual(self.asr_runs(), 1)
 
     def test_custom_cards_dir(self):
         """カード保存先はVault/Cards固定でなく任意フォルダを指定できる（Vault構成変更対応）。"""
