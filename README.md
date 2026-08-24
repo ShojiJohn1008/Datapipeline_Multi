@@ -62,3 +62,28 @@ python3 -m knowledge_hub.ingest_pdf --once
 
 設定、安全上限、Agent差し替え、OCR未対応時の挙動は
 [ローカル入力パイプライン](docs/LOCAL_PIPELINE.md#pdf一本の縦切りmvp)を参照。
+
+## YouTubeリンクからの動画取得
+
+リンクを1本渡すと、動画（`--audio` なら音声だけ）をローカルへ保存する。限定公開
+（unlisted）はリンクさえあればそのまま取得できる。非公開・年齢制限はログインが要るため
+`--cookies` / `--cookies-from-browser` を使う。
+
+```bash
+brew install yt-dlp ffmpeg      # ffmpegは映像と音声の結合に使う
+export KH_VIDEO_PATH="<動画の保存先>"   # 未設定なら $KH_ARCHIVE_PATH/Video
+
+python3 -m knowledge_hub.youtube_download "https://youtu.be/XXXXXXXXXXX"
+python3 -m knowledge_hub.youtube_download "<URL>" --audio --json
+python3 -m knowledge_hub.youtube_download "<URL>" --cookies ~/cookies.txt
+```
+
+- 保存名は `<タイトル>--<動画ID>.<拡張子>`。同じリンクを貼り直しても再取得しない。
+- 受け取ったURLはそのまま渡さず、動画IDだけを取り出して正規URLを組み直す。
+  YouTube以外のホストと、オプションに化ける文字列は入口で弾く。
+- 保存先の中に作業用ディレクトリを作り、完了後に同一ディレクトリ内で `os.replace` する。
+  途中で落ちても中途半端なファイルは残らない。
+- exit 0: stdoutがそのまま返信文 / exit 1: 取得失敗（`--json` は `error_code` を返す）
+  / exit 2: URL・設定・yt-dlp未導入。
+- 既定の上限は1本30分・4GB（`--timeout` / `--max-bytes`）。yt-dlpコマンドは
+  `KH_YTDLP_CMD` で差し替えられる。

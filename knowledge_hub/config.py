@@ -169,3 +169,29 @@ def ensure_pipeline_directories(paths: PipelinePaths) -> PipelinePaths:
     paths.cards.mkdir(parents=True, exist_ok=True)
     paths.state_db.parent.mkdir(parents=True, exist_ok=True)
     return paths
+
+
+def resolve_video_dir(cli_value: str | None = None) -> Path:
+    """動画保存先を決める。優先順: --out > $KH_VIDEO_PATH > $KH_ARCHIVE_PATH/Video。
+
+    ここでは作成せず、書き込み側が `mkdir` する。保存先そのものが未作成でも、
+    親が実在することだけは要求して、打ち間違いで深い新規ツリーを作らせない。
+    """
+    configured = _configured_path(cli_value, "KH_VIDEO_PATH")
+    if configured is not None:
+        path = _absolute(configured)
+    else:
+        archive_configured = _configured_path(None, "KH_ARCHIVE_PATH")
+        if archive_configured is None:
+            raise ConfigError(
+                "保存先が未設定です。--out か環境変数 KH_VIDEO_PATH "
+                "（または KH_ARCHIVE_PATH）で保存先を指定してください。"
+            )
+        archive = _require_directory(
+            _absolute(archive_configured), "Archive", "KH_ARCHIVE_PATH"
+        )
+        path = archive / "Video"
+    _validate_optional_directory(path, "保存先")
+    if not path.exists() and not path.parent.is_dir():
+        raise ConfigError(f"保存先の親ディレクトリが存在しない: {path.parent}")
+    return path
