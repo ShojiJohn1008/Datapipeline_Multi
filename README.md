@@ -42,6 +42,22 @@ python3 -m knowledge_hub.worker
 
 導入手順と受け入れ確認は [A-03デプロイチェックリスト](docs/A03_DEPLOY_CHECKLIST.md) を参照。
 
+## note記事の文字おこし（無料・購入済み有料）
+
+note記事URLを渡すと本文全体をVault（JohnSecondBrain）の`Cards/`へMarkdownカード化する。
+購入済み有料記事はログインCookieが必要。ID・パスワードは扱わず、ブラウザでログイン後に
+Cookie（`note_gql_auth_token` 等）をJSONでローカルに保存して使う（Git管理外・`chmod 600`）。
+
+```bash
+# 例: ~/.config/knowledge_hub/note_cookies.json に {"note_gql_auth_token":"..."} を保存
+chmod 600 ~/.config/knowledge_hub/note_cookies.json
+python3 -m knowledge_hub.ingest_note "https://note.com/<user>/n/nXXXXXXXXXXXX" [--vault PATH]
+# 置き場所を変える場合: export KH_NOTE_COOKIE_FILE=<path> か --cookie-file
+```
+
+有料部分が取得できない（未ログイン・Cookie期限切れ・未購入）場合は途中まで保存せず
+`auth_required` エラーで止まる。再実行は冪等で、生成済みカードへのユーザー編集は保持される。
+
 ## 次段階: ローカルファースト入力パイプライン
 
 原本はArchive、AIが整理した検索可能な知識カードはVaultの`Cards/`、未処理の入力は
