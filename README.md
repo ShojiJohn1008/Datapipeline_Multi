@@ -42,6 +42,15 @@ python3 -m knowledge_hub.worker
 
 導入手順と受け入れ確認は [A-03デプロイチェックリスト](docs/A03_DEPLOY_CHECKLIST.md) を参照。
 
+## YouTubeライブ → 録画・文字起こし・Obsidianノート
+
+```bash
+brew install yt-dlp ffmpeg && python3 -m pip install --user mlx-whisper
+python3 -m knowledge_hub.youtube_live "https://www.youtube.com/watch?v=XXXX"
+```
+
+詳細は [YouTubeライブ取り込み](docs/YOUTUBE_LIVE.md)。
+
 ## 次段階: ローカルファースト入力パイプライン
 
 原本はArchive、AIが整理した検索可能な知識カードはVaultの`Cards/`、未処理の入力は
